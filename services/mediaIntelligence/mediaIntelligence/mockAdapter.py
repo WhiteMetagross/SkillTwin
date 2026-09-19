@@ -1,17 +1,6 @@
 from typing import Any, Dict, List, Optional
+from .storage import LocalStorageAdapter, S3StorageAdapter, StorageAdapter
 from .validator import validateSchema, validateTimestamps
-
-class StorageAdapter:
-    def readAsset(self, key: str) -> bytes:
-        raise NotImplementedError("Storage adapter not configured for live asset reading")
-
-class LocalStorageAdapter(StorageAdapter):
-    def readAsset(self, key: str) -> bytes:
-        return b"mock file content"
-
-class S3StorageAdapter(StorageAdapter):
-    def readAsset(self, key: str) -> bytes:
-        return b"mock s3 file content"
 
 class MockMediaIntelligenceAdapter:
     """

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "videoId": "video-001",
+  "segments": [
+    {
+      "startMs": 500,
+      "endMs": 2500,
+      "text": "Inspect the ceramic mug for cracks first",
+      "confidence": 0.95
+    },
+    {
+      "startMs": 2800,
+      "endMs": 4000,
+      "text": "Choose the small standard box",
+      "confidence": 0.92
+    }
+  ]
+}
