@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "jobId": "job-pack-991",
+  "skillId": "skill-fragile-mug-001",
+  "status": "reviewRequired",
+  "stage": "readyForReview",
+  "progressPercent": 100,
+  "message": "Skill draft composed and ready for supervisor review",
+  "error": null
+}

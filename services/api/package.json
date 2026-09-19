@@ -1,0 +1,26 @@
+{
+  "name": "@skilltwin/api",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --import tsx/esm src/server.ts",
+    "test": "node --import tsx/esm --test test/api.test.ts"
+  },
+  "dependencies": {
+    "@skilltwin/contracts": "*",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.0",
+    "supertest": "^7.0.0",
+    "@types/supertest": "^6.0.2",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

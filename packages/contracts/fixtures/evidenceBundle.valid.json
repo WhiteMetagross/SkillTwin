@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "skillId": "skill-fragile-mug-001",
+  "videos": [
+    {
+      "videoId": "video-001",
+      "hasNarration": true,
+      "transcriptKey": "skills/skill-fragile-mug-001/derived/transcripts/video-001.json"
+    },
+    {
+      "videoId": "video-002",
+      "hasNarration": false,
+      "transcriptKey": null
+    }
+  ],
+  "observations": [
+    {
+      "observationId": "obs-001",
+      "videoId": "video-001",
+      "startMs": 1000,
+      "endMs": 4500,
+      "beforeState": "shelf with mugs",
+      "action": "inspect mug for surface defects",
+      "afterState": "inspected mug ready on table",
+      "visibleObjects": [
+        "ceramic mug"
+      ],
+      "spokenEvidence": "Inspect the mug for cracks first",
+      "candidateAction": "selectProduct",
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/2000.jpg",
+      "confidence": 0.95
+    },
+    {
+      "observationId": "obs-002",
+      "videoId": "video-001",
+      "startMs": 5000,
+      "endMs": 8200,
+      "beforeState": "flat folded boxes",
+      "action": "assemble small corrugated carton",
+      "afterState": "assembled carton on bench",
+      "visibleObjects": [
+        "cardboard box"
+      ],
+      "spokenEvidence": "Choose the small standard box",
+      "candidateAction": "selectBox",
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/6000.jpg",
+      "confidence": 0.92
+    },
+    {
+      "observationId": "obs-003",
+      "videoId": "video-001",
+      "startMs": 9000,
+      "endMs": 15500,
+      "beforeState": "bare mug and bubble roll",
+      "action": "wrap mug with single layer bubble sheet",
+      "afterState": "single layer wrapped mug",
+      "visibleObjects": [
+        "ceramic mug",
+        "bubble wrap"
+      ],
+      "spokenEvidence": "Wrap with bubble wrap",
+      "candidateAction": "addProtection",
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/12000.jpg",
+      "confidence": 0.88
+    },
+    {
+      "observationId": "obs-004",
+      "videoId": "video-001",
+      "startMs": 16000,
+      "endMs": 20000,
+      "beforeState": "assembled box and wrapped mug",
+      "action": "place wrapped mug into box center",
+      "afterState": "mug positioned snugly inside box",
+      "visibleObjects": [
+        "cardboard box",
+        "bubble wrap"
+      ],
+      "spokenEvidence": "Lower mug into the center",
+      "candidateAction": "placeProduct",
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/18000.jpg",
+      "confidence": 0.94
+    },
+    {
+      "observationId": "obs-005",
+      "videoId": "video-001",
+      "startMs": 21000,
+      "endMs": 26000,
+      "beforeState": "open box flaps",
+      "action": "fold flaps and apply H tape pattern",
+      "afterState": "box securely taped",
+      "visibleObjects": [
+        "cardboard box",
+        "tape"
+      ],
+      "spokenEvidence": "Apply tape along center and edge seams",
+      "candidateAction": "sealBox",
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/23000.jpg",
+      "confidence": 0.96
+    },
+    {
+      "observationId": "obs-006",
+      "videoId": "video-001",
+      "startMs": 27000,
+      "endMs": 31000,
+      "beforeState": "sealed box without label",
+      "action": "affix fragile warning sticker to top face",
+      "afterState": "sealed box with visible fragile label",
+      "visibleObjects": [
+        "cardboard box",
+        "fragile label"
+      ],
+      "spokenEvidence": "Stick the fragile label on top",
+      "candidateAction": "attachLabel",
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/29000.jpg",
+      "confidence": 0.98
+    }
+  ]
+}

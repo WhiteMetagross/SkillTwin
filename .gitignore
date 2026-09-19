@@ -1,0 +1,35 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Build outputs
+dist
+build
+.vite
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+.eggs
+dist
+build
+.pytest_cache
+.coverage
+htmlcov
+.venv
+venv
+ENV
+
+# Environment and local settings
+.env
+.env.local
+.DS_Store
+Thumbs.db
+
+# IDE and editors
+.vscode/
+.idea/

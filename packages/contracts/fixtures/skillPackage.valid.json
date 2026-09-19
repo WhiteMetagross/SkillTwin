@@ -1,0 +1,168 @@
+{
+  "schemaVersion": 1,
+  "skillId": "skill-fragile-mug-001",
+  "title": "Pack fragile ceramic mug",
+  "workflowType": "fragilePackingV1",
+  "status": "reviewRequired",
+  "version": 0,
+  "materials": [
+    "ceramic mug",
+    "bubble wrap sheet",
+    "corrugated box",
+    "packing tape",
+    "fragile label"
+  ],
+  "prerequisites": [
+    "clean packing bench",
+    "protective gloves"
+  ],
+  "steps": [
+    {
+      "stepId": "step-001",
+      "sequence": 1,
+      "actionCode": "selectProduct",
+      "instruction": "Inspect the ceramic mug for surface cracks and defects.",
+      "instructionHi": null,
+      "sourceVideoId": "video-001",
+      "startMs": 1000,
+      "endMs": 4500,
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/2000.jpg",
+      "confidence": 0.95,
+      "policyStatus": "supported",
+      "policyCitation": {
+        "documentId": "doc-packing-policy-001",
+        "page": 2,
+        "section": "Item inspection",
+        "excerpt": "Inspect fragile items for surface flaws before handling."
+      },
+      "warning": null,
+      "checkpointRequired": false,
+      "audioKey": null,
+      "evidenceObservationIds": [
+        "obs-001"
+      ]
+    },
+    {
+      "stepId": "step-002",
+      "sequence": 2,
+      "actionCode": "selectBox",
+      "instruction": "Assemble the small standard corrugated carton.",
+      "instructionHi": null,
+      "sourceVideoId": "video-001",
+      "startMs": 5000,
+      "endMs": 8200,
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/6000.jpg",
+      "confidence": 0.92,
+      "policyStatus": "supported",
+      "policyCitation": {
+        "documentId": "doc-packing-policy-001",
+        "page": 3,
+        "section": "Box sizing",
+        "excerpt": "Select a box that provides at least two inches of clearance on all sides."
+      },
+      "warning": null,
+      "checkpointRequired": false,
+      "audioKey": null,
+      "evidenceObservationIds": [
+        "obs-002"
+      ]
+    },
+    {
+      "stepId": "step-003",
+      "sequence": 3,
+      "actionCode": "addProtection",
+      "instruction": "Wrap the ceramic mug completely with bubble wrap cushioning.",
+      "instructionHi": null,
+      "sourceVideoId": "video-001",
+      "startMs": 9000,
+      "endMs": 15500,
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/12000.jpg",
+      "confidence": 0.88,
+      "policyStatus": "conflict",
+      "policyCitation": {
+        "documentId": "doc-packing-policy-001",
+        "page": 4,
+        "section": "Cushioning",
+        "excerpt": "Fragile ceramics require two complete layers of bubble wrap."
+      },
+      "warning": "Demonstration shows single wrap but policy requires two layers",
+      "checkpointRequired": true,
+      "audioKey": null,
+      "evidenceObservationIds": [
+        "obs-003"
+      ]
+    },
+    {
+      "stepId": "step-004",
+      "sequence": 4,
+      "actionCode": "placeProduct",
+      "instruction": "Place the wrapped ceramic mug upright in the center of the box.",
+      "instructionHi": null,
+      "sourceVideoId": "video-001",
+      "startMs": 16000,
+      "endMs": 20000,
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/18000.jpg",
+      "confidence": 0.94,
+      "policyStatus": "supported",
+      "policyCitation": null,
+      "warning": null,
+      "checkpointRequired": false,
+      "audioKey": null,
+      "evidenceObservationIds": [
+        "obs-004"
+      ]
+    },
+    {
+      "stepId": "step-005",
+      "sequence": 5,
+      "actionCode": "sealBox",
+      "instruction": "Close box flaps and seal center seam and edges using H tape method.",
+      "instructionHi": null,
+      "sourceVideoId": "video-001",
+      "startMs": 21000,
+      "endMs": 26000,
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/23000.jpg",
+      "confidence": 0.96,
+      "policyStatus": "supported",
+      "policyCitation": {
+        "documentId": "doc-packing-policy-001",
+        "page": 5,
+        "section": "Sealing",
+        "excerpt": "Seal center flap and edges using H tape method."
+      },
+      "warning": null,
+      "checkpointRequired": false,
+      "audioKey": null,
+      "evidenceObservationIds": [
+        "obs-005"
+      ]
+    },
+    {
+      "stepId": "step-006",
+      "sequence": 6,
+      "actionCode": "attachLabel",
+      "instruction": "Affix fragile shipping label visibly on the top face of the sealed box.",
+      "instructionHi": null,
+      "sourceVideoId": "video-001",
+      "startMs": 27000,
+      "endMs": 31000,
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/29000.jpg",
+      "confidence": 0.98,
+      "policyStatus": "supported",
+      "policyCitation": {
+        "documentId": "doc-packing-policy-001",
+        "page": 6,
+        "section": "Labeling",
+        "excerpt": "Affix fragile shipping label visibly on top flap."
+      },
+      "warning": null,
+      "checkpointRequired": true,
+      "audioKey": null,
+      "evidenceObservationIds": [
+        "obs-006"
+      ]
+    }
+  ],
+  "approvedBy": null,
+  "approvedAt": null
+}

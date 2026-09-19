@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "checkpointId": "chk-fail-002",
+  "sessionId": "sess-worker-001",
+  "stepId": "step-003",
+  "verdict": "fail",
+  "confidence": 0.91,
+  "observed": [
+    "ceramic mug",
+    "single bubble wrap"
+  ],
+  "missing": [
+    "second bubble wrap layer"
+  ],
+  "message": "Only single layer bubble wrap detected",
+  "correction": "Add a second complete layer of bubble wrap before boxing"
+}

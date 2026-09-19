@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "skillId": "skill-fragile-mug-001",
+  "videos": [
+    {
+      "videoId": "video-001",
+      "hasNarration": false,
+      "transcriptKey": null
+    }
+  ],
+  "observations": [
+    {
+      "observationId": "obs-001",
+      "videoId": "video-001",
+      "startMs": 1000,
+      "endMs": 4500,
+      "beforeState": "shelf with mugs",
+      "action": "inspect mug",
+      "afterState": "mug on table",
+      "visibleObjects": [
+        "ceramic mug"
+      ],
+      "spokenEvidence": null,
+      "candidateAction": "selectProduct",
+      "referenceFrameKey": "skills/skill-fragile-mug-001/derived/frames/video-001/2000.jpg",
+      "confidence": 1.5
+    }
+  ]
+}

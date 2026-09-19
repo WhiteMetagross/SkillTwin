@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skilltwin.io/schemas/skillPackage.schema.json",
+  "title": "SkillPackage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "skillId",
+    "title",
+    "workflowType",
+    "status",
+    "version",
+    "materials",
+    "prerequisites",
+    "steps",
+    "approvedBy",
+    "approvedAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "skillId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workflowType": {
+      "type": "string",
+      "const": "fragilePackingV1"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["reviewRequired", "approved", "published"]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "materials": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "prerequisites": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "stepId",
+          "sequence",
+          "actionCode",
+          "instruction",
+          "instructionHi",
+          "sourceVideoId",
+          "startMs",
+          "endMs",
+          "referenceFrameKey",
+          "confidence",
+          "policyStatus",
+          "policyCitation",
+          "warning",
+          "checkpointRequired",
+          "audioKey",
+          "evidenceObservationIds"
+        ],
+        "properties": {
+          "stepId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          },
+          "actionCode": {
+            "type": "string",
+            "enum": [
+              "selectProduct",
+              "selectBox",
+              "addProtection",
+              "placeProduct",
+              "sealBox",
+              "attachLabel"
+            ]
+          },
+          "instruction": {
+            "type": "string"
+          },
+          "instructionHi": {
+            "type": ["string", "null"]
+          },
+          "sourceVideoId": {
+            "type": ["string", "null"]
+          },
+          "startMs": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "endMs": {
+            "type": ["integer", "null"],
+            "minimum": 0
+          },
+          "referenceFrameKey": {
+            "type": ["string", "null"]
+          },
+          "confidence": {
+            "type": ["number", "null"],
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "policyStatus": {
+            "type": "string",
+            "enum": ["supported", "conflict", "notFound", "needsReview"]
+          },
+          "policyCitation": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["documentId", "page", "section", "excerpt"],
+            "properties": {
+              "documentId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "page": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "section": {
+                "type": "string"
+              },
+              "excerpt": {
+                "type": "string"
+              }
+            }
+          },
+          "warning": {
+            "type": ["string", "null"]
+          },
+          "checkpointRequired": {
+            "type": "boolean"
+          },
+          "audioKey": {
+            "type": ["string", "null"]
+          },
+          "evidenceObservationIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "approvedBy": {
+      "type": ["string", "null"]
+    },
+    "approvedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "skillId": "skill-fragile-mug-001",
+  "title": "Pack fragile ceramic mug",
+  "workflowType": "fragilePackingV1",
+  "status": "reviewRequired",
+  "version": 0,
+  "materials": [
+    "ceramic mug"
+  ],
+  "prerequisites": [],
+  "approvedBy": null,
+  "approvedAt": null
+}

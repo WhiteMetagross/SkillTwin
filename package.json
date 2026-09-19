@@ -1,0 +1,26 @@
+{
+  "name": "skilltwin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "services/api",
+    "services/pdfExport",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:contracts": "npm run test -w @skilltwin/contracts",
+    "test:api": "npm run test -w @skilltwin/api",
+    "test:pdf": "npm run test -w @skilltwin/pdf-export",
+    "validate:fixtures": "npm run validate:fixtures -w @skilltwin/contracts",
+    "dev:web": "npm run dev -w @skilltwin/web",
+    "start:api": "npm run start -w @skilltwin/api"
+  },
+  "devDependencies": {
+    "prettier": "^3.5.1",
+    "typescript": "^5.7.3"
+  }
+}

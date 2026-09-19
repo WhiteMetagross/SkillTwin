@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "requestId": "req-val-101",
+  "error": {
+    "code": "RESOURCE_NOT_FOUND",
+    "message": "Requested skill not found"
+  }
+}

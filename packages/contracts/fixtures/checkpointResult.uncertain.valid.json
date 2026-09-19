@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "checkpointId": "chk-unc-003",
+  "sessionId": "sess-worker-001",
+  "stepId": "step-003",
+  "verdict": "uncertain",
+  "confidence": 0.42,
+  "observed": [
+    "ceramic mug"
+  ],
+  "missing": [],
+  "message": "Image is blurry or obstructed, please capture another photo",
+  "correction": "Hold camera steady with proper lighting and retake"
+}

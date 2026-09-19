@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "skillId": "skill-fragile-mug-001",
+  "workflowType": "fragilePackingV1",
+  "title": "Pack fragile ceramic mug",
+  "videos": [
+    {
+      "videoId": "video-001",
+      "sourceKey": "skills/skill-fragile-mug-001/source/videos/video-001.mp4",
+      "mimeType": "video/mp4"
+    },
+    {
+      "videoId": "video-002",
+      "sourceKey": "skills/skill-fragile-mug-001/source/videos/video-002.mp4",
+      "mimeType": "video/mp4"
+    },
+    {
+      "videoId": "video-003",
+      "sourceKey": "skills/skill-fragile-mug-001/source/videos/video-003.mp4",
+      "mimeType": "video/mp4"
+    },
+    {
+      "videoId": "video-004",
+      "sourceKey": "skills/skill-fragile-mug-001/source/videos/video-004.mp4",
+      "mimeType": "video/mp4"
+    }
+  ],
+  "referenceImages": [],
+  "documents": [],
+  "sourceLanguage": "auto",
+  "outputLanguages": [
+    "enIN"
+  ],
+  "expectedObjects": [
+    "ceramic mug"
+  ],
+  "supervisorNotes": null
+}

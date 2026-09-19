@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skilltwin.io/schemas/assetManifest.schema.json",
+  "title": "AssetManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "skillId",
+    "workflowType",
+    "title",
+    "videos",
+    "referenceImages",
+    "documents",
+    "sourceLanguage",
+    "outputLanguages",
+    "expectedObjects",
+    "supervisorNotes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "skillId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workflowType": {
+      "type": "string",
+      "const": "fragilePackingV1"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "videos": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["videoId", "sourceKey", "mimeType"],
+        "properties": {
+          "videoId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mimeType": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "referenceImages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["imageId", "sourceKey", "mimeType"],
+        "properties": {
+          "imageId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mimeType": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["documentId", "sourceKey", "mimeType"],
+        "properties": {
+          "documentId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mimeType": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "sourceLanguage": {
+      "type": "string",
+      "enum": ["auto", "enIN", "hiIN"]
+    },
+    "outputLanguages": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["enIN", "hiIN"]
+      }
+    },
+    "expectedObjects": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "supervisorNotes": {
+      "type": ["string", "null"]
+    }
+  }
+}

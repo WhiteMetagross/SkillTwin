@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "environment": "development",
+  "project": "SkillTwin",
+  "resources": {
+    "s3Bucket": {
+      "purpose": "Media assets and generated artifacts",
+      "nameTemplate": "skilltwin-assets-${environment}-${region}"
+    },
+    "dynamoTables": {
+      "skills": "skilltwin-skills-${environment}",
+      "jobs": "skilltwin-jobs-${environment}",
+      "sessions": "skilltwin-sessions-${environment}"
+    },
+    "stepFunction": {
+      "stateMachineName": "skilltwin-pipeline-${environment}"
+    },
+    "aiServices": [
+      "bedrock",
+      "transcribe",
+      "textract",
+      "polly"
+    ]
+  }
+}

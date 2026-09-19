@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skilltwin.io/schemas/evidenceBundle.schema.json",
+  "title": "EvidenceBundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "skillId", "videos", "observations"],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "skillId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "videos": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["videoId", "hasNarration", "transcriptKey"],
+        "properties": {
+          "videoId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "hasNarration": {
+            "type": "boolean"
+          },
+          "transcriptKey": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "observationId",
+          "videoId",
+          "startMs",
+          "endMs",
+          "beforeState",
+          "action",
+          "afterState",
+          "visibleObjects",
+          "spokenEvidence",
+          "candidateAction",
+          "referenceFrameKey",
+          "confidence"
+        ],
+        "properties": {
+          "observationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "videoId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "startMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "endMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "beforeState": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "afterState": {
+            "type": "string"
+          },
+          "visibleObjects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "spokenEvidence": {
+            "type": ["string", "null"]
+          },
+          "candidateAction": {
+            "type": "string",
+            "enum": [
+              "selectProduct",
+              "selectBox",
+              "addProtection",
+              "placeProduct",
+              "sealBox",
+              "attachLabel"
+            ]
+          },
+          "referenceFrameKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0
+          }
+        }
+      }
+    }
+  }
+}

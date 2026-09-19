@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "checkpointId": "chk-pass-001",
+  "sessionId": "sess-worker-001",
+  "stepId": "step-003",
+  "verdict": "pass",
+  "confidence": 0.94,
+  "observed": [
+    "ceramic mug",
+    "double bubble wrap"
+  ],
+  "missing": [],
+  "message": "Protection verified with double layer cushioning",
+  "correction": null
+}

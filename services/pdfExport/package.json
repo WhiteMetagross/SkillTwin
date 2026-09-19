@@ -1,0 +1,19 @@
+{
+  "name": "@skilltwin/pdf-export",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx/esm --test test/pdfExport.test.ts"
+  },
+  "dependencies": {
+    "@skilltwin/contracts": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
