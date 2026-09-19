@@ -1,11 +1,19 @@
 from typing import Any, Dict, List, Optional
-from .validator import validateSchema, validateActionOrder
+from .modelCaller import LocalModelCaller, ModelCaller
+from .observationMapper import TEMPLATE_ACTIONS, mapObservationsToActionSlots
+from .policyExtractor import PdfPolicyExtractor, PolicyDocument, PolicyIndex, PolicySection
+from .policyVerifier import PolicyVerificationResult, PolicyVerifier
+from .validator import validateActionOrder, validateSchema
 
 class PolicyRetriever:
     def retrievePolicyCitations(self, skillId: str) -> Dict[str, Any]:
-        raise NotImplementedError("Live policy retrieval is not implemented in mock")
+        raise NotImplementedError("Subclasses must implement retrievePolicyCitations")
 
 class MockPolicyRetriever(PolicyRetriever):
+    """
+    Default policy retriever returning verified standard citations for fragile packing.
+    """
+
     def retrievePolicyCitations(self, skillId: str) -> Dict[str, Any]:
         return {
             "selectProduct": {
@@ -40,99 +48,98 @@ class MockPolicyRetriever(PolicyRetriever):
             }
         }
 
-class ModelCaller:
-    def composeInstructions(self, observations: List[Dict[str, Any]]) -> Dict[str, str]:
-        raise NotImplementedError("Live model caller is not implemented in mock")
-
-class MockModelCaller(ModelCaller):
-    def composeInstructions(self, observations: List[Dict[str, Any]]) -> Dict[str, str]:
-        return {
-            "selectProduct": "Inspect the ceramic mug for surface cracks and defects.",
-            "selectBox": "Assemble the small standard corrugated carton.",
-            "addProtection": "Wrap the ceramic mug completely with bubble wrap cushioning.",
-            "placeProduct": "Place the wrapped ceramic mug upright in the center of the box.",
-            "sealBox": "Close box flaps and seal center seam and edges using H tape method.",
-            "attachLabel": "Affix fragile shipping label visibly on the top face of the sealed box."
-        }
-
 class MockSkillEngineAdapter:
     """
-    Deterministic mock adapter for skill engine.
-    Does not call foundation models or live document search.
-    Maps evidence bundle observations to the six step fragile packing template.
-    Preserves deliberate policy conflicts and source observation links.
+    Adapter for skill engine service.
+    Maps evidence bundle observations across videos into the six step fragile packing template.
+    Merges repeated actions, preserves observation traceability, evaluates policy citations and conflicts,
+    and produces schema valid draft skill packages.
     """
 
     def __init__(
         self,
         policyRetriever: Optional[PolicyRetriever] = None,
-        modelCaller: Optional[ModelCaller] = None
+        modelCaller: Optional[ModelCaller] = None,
+        policyVerifier: Optional[PolicyVerifier] = None
     ) -> None:
         self.policyRetriever = policyRetriever or MockPolicyRetriever()
-        self.modelCaller = modelCaller or MockModelCaller()
+        self.modelCaller = modelCaller or LocalModelCaller()
+        self.policyVerifier = policyVerifier or PolicyVerifier()
 
-    def composeDraft(self, bundle: Dict[str, Any]) -> Dict[str, Any]:
+    def composeDraft(
+        self,
+        bundle: Dict[str, Any],
+        customCitations: Optional[Dict[str, Optional[Dict[str, Any]]]] = None
+    ) -> Dict[str, Any]:
         validBundle, bundleError = validateSchema("evidenceBundle", bundle)
         if not validBundle:
             raise ValueError(f"Invalid evidence bundle: {bundleError}")
 
         skillId = bundle["skillId"]
-        observations = bundle["observations"]
+        observations = bundle.get("observations", [])
 
-        obsByAction: Dict[str, Dict[str, Any]] = {}
-        for obs in observations:
-            action = obs["candidateAction"]
-            if action not in obsByAction:
-                obsByAction[action] = obs
+        # Map and merge observations into six fragile packing action slots
+        actionSlots = mapObservationsToActionSlots(observations)
+        observationsByAction = {slot.actionCode: slot.observations for slot in actionSlots}
 
-        citations = self.policyRetriever.retrievePolicyCitations(skillId)
-        instructions = self.modelCaller.composeInstructions(observations)
+        # Resolve policy citations
+        if customCitations is not None:
+            citations = customCitations
+        else:
+            citations = self.policyRetriever.retrievePolicyCitations(skillId)
 
-        actionConfigs = [
-            ("selectProduct", False),
-            ("selectBox", False),
-            ("addProtection", True),
-            ("placeProduct", False),
-            ("sealBox", False),
-            ("attachLabel", True)
-        ]
+        # Synthesize title, materials, prerequisites, and instructions from evidence and policy
+        composition = self.modelCaller.composeSkillContent(
+            skillId,
+            observationsByAction,
+            citations
+        )
+
+        checkpointRequiredMap = {
+            "selectProduct": False,
+            "selectBox": False,
+            "addProtection": True,
+            "placeProduct": False,
+            "sealBox": False,
+            "attachLabel": True
+        }
 
         steps: List[Dict[str, Any]] = []
 
-        for index, (actionCode, checkpointRequired) in enumerate(actionConfigs):
+        for index, slot in enumerate(actionSlots):
             seq = index + 1
-            obs = obsByAction.get(actionCode)
-            instruction = instructions.get(actionCode, f"Execute step {seq}")
-
-            if actionCode == "addProtection":
-                policyStatus = "conflict"
-                warning = "Demonstration shows single wrap but policy requires two layers"
-            elif actionCode in citations:
-                policyStatus = "supported"
-                warning = None
-            else:
-                policyStatus = "supported" if obs else "needsReview"
-                warning = None
-
+            actionCode = slot.actionCode
+            rep = slot.representative
             citation = citations.get(actionCode)
+            baseInstruction = composition.instructions.get(actionCode, f"Execute step {seq}")
+
+            verification = self.policyVerifier.verifyAction(
+                actionCode=actionCode,
+                observations=slot.observations,
+                citation=citation,
+                defaultInstruction=baseInstruction
+            )
+
+            finalInstruction = verification.proposedInstruction or baseInstruction
+            checkpointReq = checkpointRequiredMap.get(actionCode, False)
 
             steps.append({
                 "stepId": f"step-00{seq}",
                 "sequence": seq,
                 "actionCode": actionCode,
-                "instruction": instruction,
+                "instruction": finalInstruction,
                 "instructionHi": None,
-                "sourceVideoId": obs["videoId"] if obs else None,
-                "startMs": obs["startMs"] if obs else None,
-                "endMs": obs["endMs"] if obs else None,
-                "referenceFrameKey": obs["referenceFrameKey"] if obs else None,
-                "confidence": obs["confidence"] if obs else None,
-                "policyStatus": policyStatus,
-                "policyCitation": citation,
-                "warning": warning,
-                "checkpointRequired": checkpointRequired,
+                "sourceVideoId": rep["videoId"] if rep else None,
+                "startMs": rep["startMs"] if rep else None,
+                "endMs": rep["endMs"] if rep else None,
+                "referenceFrameKey": rep["referenceFrameKey"] if rep else None,
+                "confidence": rep["confidence"] if rep else None,
+                "policyStatus": verification.status,
+                "policyCitation": verification.citation,
+                "warning": verification.warning,
+                "checkpointRequired": checkpointReq,
                 "audioKey": None,
-                "evidenceObservationIds": [obs["observationId"]] if obs else []
+                "evidenceObservationIds": slot.observationIds
             })
 
         if not validateActionOrder(steps):
@@ -141,21 +148,12 @@ class MockSkillEngineAdapter:
         draft = {
             "schemaVersion": 1,
             "skillId": skillId,
-            "title": "Pack fragile ceramic mug",
+            "title": composition.title,
             "workflowType": "fragilePackingV1",
             "status": "reviewRequired",
             "version": 0,
-            "materials": [
-                "ceramic mug",
-                "bubble wrap sheet",
-                "corrugated box",
-                "packing tape",
-                "fragile label"
-            ],
-            "prerequisites": [
-                "clean packing bench",
-                "protective gloves"
-            ],
+            "materials": composition.materials,
+            "prerequisites": composition.prerequisites,
             "steps": steps,
             "approvedBy": None,
             "approvedAt": None
