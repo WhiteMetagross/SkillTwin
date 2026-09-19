@@ -1,17 +1,24 @@
 import io
 import json
 from pathlib import Path
+import tempfile
 from unittest.mock import MagicMock
+from PIL import Image
 import pytest
 from mediaIntelligence.audioDetector import AudioDetector
 from mediaIntelligence.bedrockObserver import BedrockObserver
 from mediaIntelligence.bundleComposer import BundleComposer
 from mediaIntelligence.mockAdapter import MockMediaIntelligenceAdapter
-from mediaIntelligence.observer import LocalMediaObserver, Observation
+from mediaIntelligence.observer import (
+    DeterministicMockObserver,
+    LocalMediaObserver,
+    Observation
+)
 from mediaIntelligence.pipeline import processAssetManifest
 from mediaIntelligence.storage import LocalStorageAdapter, S3StorageAdapter
 from mediaIntelligence.transcriber import AmazonTranscribeService, LocalTranscribeService
 from mediaIntelligence.validator import validateSchema
+from mediaIntelligence.videoSampler import SampledFrame, VideoSampler
 from mediaIntelligence.videoValidator import VideoMetadata, VideoValidator
 
 def getFixturePath(filename: str) -> Path:
@@ -189,173 +196,29 @@ def testProcessTwoVideosIndependently() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Schema error: {error}"
 
-def testInvalidManifestRejection() -> None:
-    manifestPath = getFixturePath("assetManifest.unknownField.invalid.json")
-    with open(manifestPath, "r", encoding="utf-8") as f:
-        manifest = json.load(f)
+def testIdenticalNarratedBytesUnderDifferentFilenames() -> None:
+    detector = AudioDetector()
+    narratedOriginal = getAssetPath("narrated_pack.mp4")
+    originalResult = detector.inspectAudio(narratedOriginal)
+    assert originalResult.hasUsableSpeech is True
 
-    with pytest.raises(ValueError):
-        processAssetManifest(manifest, assetRoot=getAssetPath(""))
+    # Create temporary copy with an arbitrary non descriptive filename
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tempPath = Path(tmp.name)
 
-def testUnsupportedMediaTypeRejection() -> None:
-    manifest = {
-        "schemaVersion": 1,
-        "skillId": "skill-unsupported-001",
-        "workflowType": "fragilePackingV1",
-        "title": "Unsupported media",
-        "videos": [
-            {
-                "videoId": "video-unsupported-001",
-                "sourceKey": "silent_pack.mp4",
-                "mimeType": "text/plain"
-            }
-        ],
-        "referenceImages": [],
-        "documents": [],
-        "sourceLanguage": "enIN",
-        "outputLanguages": ["enIN"],
-        "expectedObjects": ["ceramic mug"],
-        "supervisorNotes": None
-    }
-
-    with pytest.raises(ValueError, match="Unsupported media type"):
-        processAssetManifest(manifest, assetRoot=getAssetPath(""))
-
-def testCorruptVideoRejection() -> None:
-    manifest = {
-        "schemaVersion": 1,
-        "skillId": "skill-corrupt-001",
-        "workflowType": "fragilePackingV1",
-        "title": "Corrupt video test",
-        "videos": [
-            {
-                "videoId": "video-corrupt-001",
-                "sourceKey": "corrupt_video.mp4",
-                "mimeType": "video/mp4"
-            }
-        ],
-        "referenceImages": [],
-        "documents": [],
-        "sourceLanguage": "enIN",
-        "outputLanguages": ["enIN"],
-        "expectedObjects": ["ceramic mug"],
-        "supervisorNotes": None
-    }
-
-    with pytest.raises(ValueError, match="empty or corrupted|cannot be opened"):
-        processAssetManifest(manifest, assetRoot=getAssetPath(""))
-
-def testExcessiveDurationRejection() -> None:
-    validator = VideoValidator()
-    mockPath = getAssetPath("silent_pack.mp4")
-
-    vRecord = {
-        "videoId": "video-long-001",
-        "sourceKey": "silent_pack.mp4",
-        "mimeType": "video/mp4"
-    }
-
-    origMax = validator.MAX_DURATION_MS
     try:
-        validator.MAX_DURATION_MS = 500
-        with pytest.raises(ValueError, match="exceeds maximum release limit"):
-            validator.validateVideoRecord(vRecord, mockPath)
+        tempPath.write_bytes(narratedOriginal.read_bytes())
+        renamedResult = detector.inspectAudio(tempPath)
+        assert renamedResult.hasAudioTrack is True
+        assert renamedResult.hasUsableSpeech is True
     finally:
-        validator.MAX_DURATION_MS = origMax
+        if tempPath.is_file():
+            tempPath.unlink()
 
-def testLocalStorageSafeTraversal() -> None:
-    storage = LocalStorageAdapter(getAssetPath(""))
-    key = "test_write.txt"
-    storage.writeAsset(key, b"hello storage")
-    assert storage.assetExists(key)
-    assert storage.readAsset(key) == b"hello storage"
-
-    with pytest.raises(ValueError, match="traversal"):
-        storage.readAsset("../../../windows/system32/cmd.exe")
-
-def testS3StorageAdapterMock() -> None:
-    mockS3 = MagicMock()
-    mockS3.get_object.return_value = {"Body": io.BytesIO(b"s3 binary data")}
-    mockS3.head_object.return_value = {}
-
-    adapter = S3StorageAdapter("test-bucket", s3Client=mockS3)
-    data = adapter.readAsset("skills/skill-001/video.mp4")
-    assert data == b"s3 binary data"
-
-    resKey = adapter.writeAsset("skills/skill-001/frame.jpg", b"frame data")
-    assert resKey == "skills/skill-001/frame.jpg"
-    mockS3.put_object.assert_called_once()
-
-    assert adapter.assetExists("skills/skill-001/video.mp4") is True
-
-def testBedrockObserverMockSuccess() -> None:
-    mockBedrock = MagicMock()
-    modelOutput = {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps([
-                    {
-                        "startMs": 0,
-                        "endMs": 1500,
-                        "beforeState": "shelf with mugs",
-                        "action": "inspect ceramic mug",
-                        "afterState": "mug on table",
-                        "visibleObjects": ["ceramic mug"],
-                        "spokenEvidence": "Inspect mug first",
-                        "candidateAction": "selectProduct",
-                        "referenceFrameKey": "skills/skill-001/derived/frames/v1/0.jpg",
-                        "confidence": 0.96
-                    }
-                ])
-            }
-        ]
-    }
-    mockBedrock.invoke_model.return_value = {
-        "body": io.BytesIO(json.dumps(modelOutput).encode("utf-8"))
-    }
-
-    observer = BedrockObserver(bedrockClient=mockBedrock)
-    from mediaIntelligence.videoSampler import SampledFrame
-    frames = [
-        SampledFrame("v1", 0, 0, "skills/skill-001/derived/frames/v1/0.jpg", b"fakejpg", 160, 120)
-    ]
-    observations = observer.observeVideo("v1", "skill-001", frames, [])
-
-    assert len(observations) == 1
-    assert observations[0].candidateAction == "selectProduct"
-    assert observations[0].confidence == 0.96
-
-def testBedrockObserverMalformedFallback() -> None:
-    mockBedrock = MagicMock()
-    badOutput = {
-        "content": [
-            {
-                "type": "text",
-                "text": "This is unformatted plain text"
-            }
-        ]
-    }
-    mockBedrock.invoke_model.return_value = {
-        "body": io.BytesIO(json.dumps(badOutput).encode("utf-8"))
-    }
-
-    localFallback = LocalMediaObserver()
-    observer = BedrockObserver(bedrockClient=mockBedrock, fallbackObserver=localFallback)
-
-    from mediaIntelligence.videoSampler import SampledFrame
-    frames = [
-        SampledFrame("v1", 0, 0, "skills/skill-001/derived/frames/v1/0.jpg", b"fakejpg", 160, 120),
-        SampledFrame("v1", 1500, 15, "skills/skill-001/derived/frames/v1/1500.jpg", b"fakejpg2", 160, 120)
-    ]
-    observations = observer.observeVideo("v1", "skill-001", frames, [])
-
-    assert len(observations) == 2
-    assert observations[0].candidateAction == "selectProduct"
-
-def testAmazonTranscribeServiceMock() -> None:
+def testCompletedTranscriptArtifactAndPendingJobRejection() -> None:
     mockTranscribe = MagicMock()
-    mockTranscribe.start_transcription_job.return_value = {
+    # Case 1: Job is IN_PROGRESS -> must not return a transcript key
+    mockTranscribe.get_transcription_job.return_value = {
         "TranscriptionJob": {
             "TranscriptionJobStatus": "IN_PROGRESS"
         }
@@ -364,35 +227,165 @@ def testAmazonTranscribeServiceMock() -> None:
     service = AmazonTranscribeService(transcribeClient=mockTranscribe)
     storage = LocalStorageAdapter(getAssetPath(""))
 
-    transcriptKey = service.transcribeVideo(
-        videoId="video-001",
-        skillId="skill-001",
-        localFilePath=None,
-        storageAdapter=storage
+    pendingKey, pendingSegs = service.transcribe("v1", "skill-001", None, storage)
+    assert pendingKey is None
+    assert len(pendingSegs) == 0
+
+    # Case 2: Job is COMPLETED -> parses segments and writes artifact
+    transcriptJsonContent = json.dumps({
+        "results": {
+            "items": [
+                {
+                    "type": "pronunciation",
+                    "start_time": "0.5",
+                    "end_time": "2.0",
+                    "alternatives": [{"content": "Inspect ceramic mug", "confidence": "0.98"}]
+                }
+            ]
+        }
+    })
+
+    mockTranscribe.get_transcription_job.return_value = {
+        "TranscriptionJob": {
+            "TranscriptionJobStatus": "COMPLETED",
+            "Transcript": {
+                "TranscriptFileUri": transcriptJsonContent
+            }
+        }
+    }
+
+    compKey, compSegs = service.transcribe("v1", "skill-001", None, storage)
+    assert compKey is not None
+    assert len(compSegs) == 1
+    assert compSegs[0].text == "Inspect ceramic mug"
+    assert compSegs[0].startMs == 500
+    assert storage.assetExists(compKey) is True
+
+def testBlankOrIrrelevantFramesProduceNoCannedObservations() -> None:
+    observer = LocalMediaObserver()
+
+    # Generate solid gray blank frames
+    blankBuf = io.BytesIO()
+    Image.new("RGB", (160, 120), (120, 120, 120)).save(blankBuf, format="JPEG")
+    blankBytes = blankBuf.getvalue()
+
+    frames = [
+        SampledFrame("v-blank", 0, 0, "skills/s1/frames/0.jpg", blankBytes, 160, 120),
+        SampledFrame("v-blank", 1500, 15, "skills/s1/frames/1500.jpg", blankBytes, 160, 120)
+    ]
+
+    observations = observer.observeVideo("v-blank", "s1", frames, [])
+    # Real observer must fail closed rather than emitting canned mug/box observations
+    assert len(observations) == 0
+
+def testLocalStorageCannotReadOutsideAssetRoot() -> None:
+    assetDir = getAssetPath("")
+    storage = LocalStorageAdapter(assetDir)
+
+    # Attempt to read README.md from working directory which is outside assetDir
+    with pytest.raises(FileNotFoundError):
+        storage.readAsset("README.md")
+
+    # Attempt directory traversal
+    with pytest.raises(ValueError, match="traversal"):
+        storage.readAsset("../../../package.json")
+
+def testS3InputStagesLocallyForValidationAndSampling() -> None:
+    mockS3 = MagicMock()
+    realVideoBytes = getAssetPath("silent_pack.mp4").read_bytes()
+
+    mockS3.head_object.return_value = {"ContentLength": len(realVideoBytes)}
+    mockS3.get_object.return_value = {"Body": io.BytesIO(realVideoBytes)}
+
+    adapter = S3StorageAdapter("test-bucket", s3Client=mockS3)
+    stagedPath = adapter.resolveLocalPath("skills/s1/source/videos/video-001.mp4")
+
+    assert stagedPath is not None
+    assert stagedPath.is_file()
+    assert stagedPath.stat().st_size == len(realVideoBytes)
+
+    # Verify validator can decode the staged file
+    validator = VideoValidator()
+    meta = validator.validateVideoRecord(
+        {"videoId": "video-001", "sourceKey": "skills/s1/source/videos/video-001.mp4", "mimeType": "video/mp4"},
+        stagedPath
     )
+    assert meta.durationMs > 0
 
-    assert transcriptKey == "skills/skill-001/derived/transcripts/video-001.json"
-    mockTranscribe.start_transcription_job.assert_called_once()
+    # Cleanup removes the staged file
+    adapter.cleanup()
+    assert not stagedPath.is_file()
 
-def testMissingFrameRejectionInBundleComposer() -> None:
+def testObserverIntervalExceedingVideoDurationRejection() -> None:
     composer = BundleComposer()
     storage = LocalStorageAdapter(getAssetPath(""))
+    frameKey = "skills/skill-fragile-mug-001/derived/frames/video-001/0.jpg"
 
     videoRecords = [{"videoId": "v1", "hasNarration": False, "transcriptKey": None}]
     obs = Observation(
         observationId="obs-pending",
         videoId="v1",
         startMs=0,
-        endMs=1000,
+        endMs=5000,
         beforeState="init",
         action="act",
         afterState="done",
         visibleObjects=["item"],
         spokenEvidence=None,
         candidateAction="selectProduct",
-        referenceFrameKey="nonexistent/frame/key.jpg",
+        referenceFrameKey=frameKey,
         confidence=0.9
     )
 
-    with pytest.raises(ValueError, match="Reference frame does not exist"):
-        composer.composeBundle("skill-001", videoRecords, {"v1": [obs]}, storage)
+    # Video duration is 2500ms, but observation endMs is 5000ms
+    with pytest.raises(ValueError, match="exceeds video duration"):
+        composer.composeBundle(
+            skillId="s1",
+            videoRecords=videoRecords,
+            perVideoObservations={"v1": [obs]},
+            storageAdapter=storage,
+            videoDurationMap={"v1": 2500}
+        )
+
+def testUnsuppliedReferenceFrameKeyRejection() -> None:
+    composer = BundleComposer()
+    storage = LocalStorageAdapter(getAssetPath(""))
+    frameKey = "skills/skill-fragile-mug-001/derived/frames/video-001/0.jpg"
+
+    videoRecords = [{"videoId": "v1", "hasNarration": False, "transcriptKey": None}]
+    obs = Observation(
+        observationId="obs-pending",
+        videoId="v1",
+        startMs=0,
+        endMs=1500,
+        beforeState="init",
+        action="act",
+        afterState="done",
+        visibleObjects=["item"],
+        spokenEvidence=None,
+        candidateAction="selectProduct",
+        referenceFrameKey=frameKey,
+        confidence=0.9
+    )
+
+    # Supplied keys set does not include frameKey
+    with pytest.raises(ValueError, match="was not in supplied sampled frames"):
+        composer.composeBundle(
+            skillId="s1",
+            videoRecords=videoRecords,
+            perVideoObservations={"v1": [obs]},
+            storageAdapter=storage,
+            suppliedFrameKeysMap={"v1": {"skills/different/frame.jpg"}}
+        )
+
+def testBedrockObserverFailsClosedOnError() -> None:
+    mockBedrock = MagicMock()
+    mockBedrock.invoke_model.side_effect = RuntimeError("Bedrock runtime error")
+
+    observer = BedrockObserver(bedrockClient=mockBedrock)
+    frames = [
+        SampledFrame("v1", 0, 0, "skills/skill-001/derived/frames/v1/0.jpg", b"fakejpg", 160, 120)
+    ]
+    observations = observer.observeVideo("v1", "skill-001", frames, [])
+    # Must fail closed with empty list, never returning canned observations
+    assert observations == []

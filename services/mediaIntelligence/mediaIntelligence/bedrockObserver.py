@@ -2,7 +2,7 @@ import base64
 import json
 from typing import Any, Dict, List, Optional
 from .imageCaptioner import ImageCaption
-from .observer import ALLOWED_CANDIDATE_ACTIONS, LocalMediaObserver, MediaObserver, Observation
+from .observer import ALLOWED_CANDIDATE_ACTIONS, MediaObserver, Observation
 from .transcriber import TranscriptSegment
 from .videoSampler import SampledFrame
 
@@ -10,18 +10,17 @@ class BedrockObserver(MediaObserver):
     """
     Multimodal media observer using Amazon Bedrock foundation models.
     Analyzes sampled video frames, transcript segments, and reference image context.
-    Safely handles malformed responses and falls back to deterministic local observer.
+    Validates model output and fails closed on provider or parsing errors.
+    Never falls back to canned observations on provider failure.
     """
 
     def __init__(
         self,
         bedrockClient: Optional[Any] = None,
-        modelId: str = "anthropic.claude-3-5-sonnet-20240620-v1:0",
-        fallbackObserver: Optional[MediaObserver] = None
+        modelId: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
     ) -> None:
         self.bedrockClient = bedrockClient
         self.modelId = modelId
-        self.fallbackObserver = fallbackObserver or LocalMediaObserver()
 
     def _getClient(self) -> Any:
         if self.bedrockClient is not None:
@@ -39,6 +38,9 @@ class BedrockObserver(MediaObserver):
     ) -> List[Observation]:
         if not frames:
             return []
+
+        suppliedFrameKeys = {f.storageKey for f in frames}
+        totalDurationMs = max(frames[-1].timestampMs + 1000, 1000)
 
         try:
             client = self._getClient()
@@ -121,8 +123,12 @@ class BedrockObserver(MediaObserver):
                 endMs = int(item.get("endMs", startMs + 1000))
                 if endMs <= startMs:
                     endMs = startMs + 1000
+                if endMs > totalDurationMs:
+                    endMs = totalDurationMs
 
-                refKey = item.get("referenceFrameKey") or selectedFrames[0].storageKey
+                refKey = item.get("referenceFrameKey")
+                if refKey not in suppliedFrameKeys:
+                    raise ValueError(f"Model returned unsupplied referenceFrameKey: {refKey}")
 
                 validObservations.append(
                     Observation(
@@ -141,10 +147,7 @@ class BedrockObserver(MediaObserver):
                     )
                 )
 
-            return validObservations if validObservations else self.fallbackObserver.observeVideo(
-                videoId, skillId, frames, transcriptSegments, referenceCaptions
-            )
+            return validObservations
         except Exception:
-            return self.fallbackObserver.observeVideo(
-                videoId, skillId, frames, transcriptSegments, referenceCaptions
-            )
+            # Never fall back to canned observations on Bedrock failure
+            return []

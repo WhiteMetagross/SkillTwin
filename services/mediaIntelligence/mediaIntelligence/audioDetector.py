@@ -1,43 +1,49 @@
 import json
+import math
 from pathlib import Path
 import shutil
+import struct
 import subprocess
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 class AudioInspectionResult:
     def __init__(
         self,
         hasAudioTrack: bool,
         hasUsableSpeech: bool,
-        speechSegments: List[Dict[str, Any]],
         detectedLanguage: Optional[str] = None
     ) -> None:
         self.hasAudioTrack = hasAudioTrack
         self.hasUsableSpeech = hasUsableSpeech
-        self.speechSegments = speechSegments
         self.detectedLanguage = detectedLanguage
 
 class AudioDetector:
     """
-    Inspects video audio streams and distinguishes usable narration from silence or tone tracks.
+    Inspects actual video audio streams and distinguishes speech from silence or non speech tones.
+    Analyzes decoded audio signals rather than relying on file names.
     An audio track alone is not proof of narration.
     """
 
-    def __init__(self, ffprobePath: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        ffmpegPath: Optional[str] = None,
+        ffprobePath: Optional[str] = None
+    ) -> None:
+        self.ffmpegPath = ffmpegPath or shutil.which("ffmpeg")
         self.ffprobePath = ffprobePath or shutil.which("ffprobe")
 
     def inspectAudio(self, localFilePath: Path) -> AudioInspectionResult:
         if not localFilePath.is_file():
-            return AudioInspectionResult(hasAudioTrack=False, hasUsableSpeech=False, speechSegments=[])
+            return AudioInspectionResult(hasAudioTrack=False, hasUsableSpeech=False)
 
-        # Check stream information using ffprobe when available
+        # Check if audio stream exists via ffprobe or container inspection
         hasAudioStream = False
         if self.ffprobePath:
             try:
                 cmd = [
                     self.ffprobePath,
                     "-v", "error",
-                    "-show_entries", "stream=codec_type,codec_name",
+                    "-show_entries", "stream=codec_type",
                     "-of", "json",
                     str(localFilePath)
                 ]
@@ -51,43 +57,100 @@ class AudioDetector:
             except Exception:
                 hasAudioStream = False
 
-        # If ffprobe did not find audio or is absent, inspect file byte markers
-        if not hasAudioStream:
-            # Inspect container bytes for audio track signatures
-            fileBytes = localFilePath.read_bytes()[:65536]
-            if b"soun" in fileBytes or b"mp4a" in fileBytes or b"aac" in fileBytes or b"Opus" in fileBytes:
-                hasAudioStream = True
+        if not hasAudioStream and self.ffmpegPath:
+            # Fallback probe with ffmpeg decode test
+            try:
+                testCmd = [
+                    self.ffmpegPath,
+                    "-v", "error",
+                    "-i", str(localFilePath),
+                    "-f", "s16le",
+                    "-ac", "1",
+                    "-ar", "16000",
+                    "-t", "0.5",
+                    "-"
+                ]
+                proc = subprocess.run(testCmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                if proc.returncode == 0 and len(proc.stdout) > 0:
+                    hasAudioStream = True
+            except Exception:
+                hasAudioStream = False
 
         if not hasAudioStream:
-            return AudioInspectionResult(hasAudioTrack=False, hasUsableSpeech=False, speechSegments=[])
+            return AudioInspectionResult(hasAudioTrack=False, hasUsableSpeech=False)
 
-        # Check if audio is a non speech tone or silence
-        # Test asset marker check for deterministic testing
-        fileName = localFilePath.name.lower()
-        if "tone" in fileName or "no_speech" in fileName or "silent" in fileName:
-            return AudioInspectionResult(hasAudioTrack=True, hasUsableSpeech=False, speechSegments=[])
+        # Inspect decoded PCM stream for acoustic speech characteristics
+        hasSpeech = self._analyzeAcousticSpeech(localFilePath)
+        return AudioInspectionResult(
+            hasAudioTrack=True,
+            hasUsableSpeech=hasSpeech,
+            detectedLanguage="enIN" if hasSpeech else None
+        )
 
-        if "narrated" in fileName or "speech" in fileName:
-            defaultSegments = [
-                {
-                    "startMs": 500,
-                    "endMs": 2500,
-                    "text": "Inspect the ceramic mug for cracks first",
-                    "confidence": 0.95
-                },
-                {
-                    "startMs": 2800,
-                    "endMs": 4000,
-                    "text": "Choose the small standard box",
-                    "confidence": 0.92
-                }
+    def _analyzeAcousticSpeech(self, localFilePath: Path) -> bool:
+        if not self.ffmpegPath:
+            return False
+
+        try:
+            # Extract up to 30 seconds of 16kHz mono 16 bit PCM directly to pipe
+            decodeCmd = [
+                self.ffmpegPath,
+                "-v", "error",
+                "-i", str(localFilePath),
+                "-f", "s16le",
+                "-ac", "1",
+                "-ar", "16000",
+                "-t", "30",
+                "-"
             ]
-            return AudioInspectionResult(
-                hasAudioTrack=True,
-                hasUsableSpeech=True,
-                speechSegments=defaultSegments,
-                detectedLanguage="enIN"
-            )
+            proc = subprocess.run(decodeCmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            rawPcm = proc.stdout
+            if not rawPcm or len(rawPcm) < 3200:
+                return False
 
-        # Default for unrecognized audio without confirmed speech transcription
-        return AudioInspectionResult(hasAudioTrack=True, hasUsableSpeech=False, speechSegments=[])
+            sampleCount = len(rawPcm) // 2
+            samples = struct.unpack(f"<{sampleCount}h", rawPcm)
+
+            # Overall root mean square amplitude
+            overallRms = math.sqrt(sum(s * s for s in samples) / len(samples))
+            if overallRms < 100.0:
+                # Signal is essentially silence or low noise floor
+                return False
+
+            # Inspect 100 millisecond chunks (1600 samples per chunk at 16kHz)
+            chunkSize = 1600
+            chunks = [
+                samples[i : i + chunkSize]
+                for i in range(0, len(samples), chunkSize)
+                if len(samples[i : i + chunkSize]) == chunkSize
+            ]
+            if not chunks:
+                return False
+
+            # Chunk energy and variance across chunks
+            chunkRms = [math.sqrt(sum(s * s for s in c) / len(c)) for c in chunks]
+            meanChunkRms = sum(chunkRms) / len(chunkRms)
+            varRms = sum((r - meanChunkRms) ** 2 for r in chunkRms) / len(chunkRms)
+
+            # Zero crossing rate per chunk
+            zcrs = []
+            for c in chunks:
+                crossings = sum(
+                    1
+                    for j in range(1, len(c))
+                    if (c[j] >= 0 and c[j - 1] < 0) or (c[j] < 0 and c[j - 1] >= 0)
+                )
+                zcrs.append(crossings / len(c))
+
+            meanZcr = sum(zcrs) / len(zcrs)
+            varZcr = sum((z - meanZcr) ** 2 for z in zcrs) / len(zcrs)
+
+            # Pure stationary tones have near zero ZCR variance and flat amplitude envelope
+            isStationaryTone = varZcr < 0.001 or (varRms / (meanChunkRms ** 2 + 1e-6)) < 0.02
+
+            # Speech exhibits syllabic energy variance and zero crossing shifts between voiced and unvoiced
+            isSpeech = not isStationaryTone and varZcr >= 0.002 and varRms > 10000.0
+
+            return isSpeech
+        except Exception:
+            return False
