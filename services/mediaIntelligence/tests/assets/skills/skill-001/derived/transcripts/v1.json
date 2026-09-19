@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "videoId": "v1",
+  "segments": [
+    {
+      "startMs": 500,
+      "endMs": 2000,
+      "text": "Inspect ceramic mug",
+      "confidence": 0.98
+    }
+  ]
+}

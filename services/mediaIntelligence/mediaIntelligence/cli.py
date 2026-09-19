@@ -1,13 +1,17 @@
 import argparse
 import json
-import sys
 from pathlib import Path
+import sys
 from .mockAdapter import MockMediaIntelligenceAdapter
+from .pipeline import processAssetManifest
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SkillTwin media intelligence CLI mock")
+    parser = argparse.ArgumentParser(
+        description="SkillTwin media intelligence CLI with real media processing and fixture mock mode"
+    )
     parser.add_argument("--manifest", required=True, help="Path to asset manifest JSON file")
-    parser.add_argument("--output", required=False, help="Optional output JSON path")
+    parser.add_argument("--asset-root", required=False, default=None, help="Root directory for local video assets")
+    parser.add_argument("--output", required=False, default=None, help="Optional output JSON path")
 
     args = parser.parse_args()
     manifestPath = Path(args.manifest)
@@ -19,9 +23,28 @@ def main() -> None:
     with open(manifestPath, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    adapter = MockMediaIntelligenceAdapter()
+    # Determine processing mode based on asset root and file existence
+    useRealPipeline = False
+    assetRootPath = None
+
+    if args.asset_root:
+        assetRootPath = Path(args.asset_root)
+        useRealPipeline = True
+    else:
+        # Check if first video sourceKey exists locally
+        videos = manifest.get("videos", [])
+        if videos:
+            firstKey = videos[0].get("sourceKey", "")
+            if Path(firstKey).is_file():
+                useRealPipeline = True
+                assetRootPath = Path.cwd()
+
     try:
-        bundle = adapter.processManifest(manifest)
+        if useRealPipeline:
+            bundle = processAssetManifest(manifest, assetRoot=assetRootPath)
+        else:
+            adapter = MockMediaIntelligenceAdapter()
+            bundle = adapter.processManifest(manifest)
     except Exception as exc:
         print(f"Processing failed: {exc}", file=sys.stderr)
         sys.exit(1)

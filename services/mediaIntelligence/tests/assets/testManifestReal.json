@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "skillId": "skill-fragile-mug-001",
+  "workflowType": "fragilePackingV1",
+  "title": "Pack ceramic mug",
+  "videos": [
+    {
+      "videoId": "video-001",
+      "sourceKey": "narrated_pack.mp4",
+      "mimeType": "video/mp4"
+    },
+    {
+      "videoId": "video-002",
+      "sourceKey": "silent_pack.mp4",
+      "mimeType": "video/mp4"
+    }
+  ],
+  "referenceImages": [
+    {
+      "imageId": "img-001",
+      "sourceKey": "reference_mug.jpg",
+      "mimeType": "image/jpeg"
+    }
+  ],
+  "documents": [
+    {
+      "documentId": "doc-001",
+      "sourceKey": "samplePolicy.pdf",
+      "mimeType": "application/pdf"
+    }
+  ],
+  "sourceLanguage": "enIN",
+  "outputLanguages": [
+    "enIN",
+    "hiIN"
+  ],
+  "expectedObjects": [
+    "ceramic mug",
+    "cardboard box",
+    "bubble wrap"
+  ],
+  "supervisorNotes": "Follow standard fragile packing guidelines"
+}
