@@ -5,14 +5,15 @@ from pathlib import Path
 from .mockAdapter import MockWorkerCoachAdapter
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SkillTwin worker coach CLI mock")
+    parser = argparse.ArgumentParser(description="SkillTwin worker coach CLI")
     parser.add_argument("--request", required=True, help="Path to checkpoint request JSON file")
     parser.add_argument(
         "--verdict",
         choices=["pass", "fail", "uncertain"],
         default="pass",
-        help="Explicit verdict selection for mock evaluation"
+        help="Explicit verdict selection for mock evaluation path"
     )
+    parser.add_argument("--image", required=False, help="Optional path to real worker photo for content evaluation")
     parser.add_argument("--output", required=False, help="Optional output JSON path")
 
     args = parser.parse_args()
@@ -27,7 +28,15 @@ def main() -> None:
 
     adapter = MockWorkerCoachAdapter()
     try:
-        result = adapter.evaluateCheckpoint(request, verdict=args.verdict)
+        if args.image:
+            imagePath = Path(args.image)
+            if not imagePath.is_file():
+                print(f"Error: image file not found at {imagePath}", file=sys.stderr)
+                sys.exit(1)
+            imageBytes = imagePath.read_bytes()
+            result = adapter.evaluateRequestContent(request, imageBytes=imageBytes)
+        else:
+            result = adapter.evaluateCheckpoint(request, verdict=args.verdict)
     except Exception as exc:
         print(f"Evaluation failed: {exc}", file=sys.stderr)
         sys.exit(1)
