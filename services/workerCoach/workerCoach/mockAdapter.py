@@ -1,7 +1,11 @@
 from typing import Any, Dict, Literal, Optional
 from .contentResolver import ContentResolver, LocalContentResolver
 from .validator import validateSchema
-from .visionEvaluator import LocalCriteriaVisionEvaluator, VisionEvaluator
+from .visionEvaluator import (
+    LocalCriteriaVisionEvaluator,
+    MockCriteriaVisionEvaluator,
+    VisionEvaluator,
+)
 
 MockVerdict = Literal["pass", "fail", "uncertain"]
 
@@ -18,7 +22,7 @@ class MockWorkerCoachAdapter:
         visionEvaluator: Optional[VisionEvaluator] = None
     ) -> None:
         self.contentResolver = contentResolver or LocalContentResolver()
-        self.visionEvaluator = visionEvaluator or LocalCriteriaVisionEvaluator()
+        self.visionEvaluator = visionEvaluator or MockCriteriaVisionEvaluator()
 
     def evaluateCheckpoint(
         self,
@@ -101,15 +105,31 @@ class MockWorkerCoachAdapter:
         stepId = request["stepId"]
         imageKey = request["checkpointImageKey"]
 
-        # Resolve step criteria
-        stepCriteria = self.contentResolver.resolveApprovedStep(stepId) or {
-            "stepId": stepId,
-            "actionCode": "addProtection" if "protection" in stepId.lower() or "003" in stepId else "genericStep",
-            "instruction": "Execute step according to packaging standards"
-        }
+        # Resolve step criteria strictly from approved version
+        stepCriteria = self.contentResolver.resolveApprovedStep(stepId, sessionId=sessionId)
+        if stepCriteria is None:
+            raise ValueError(f"Cannot evaluate checkpoint for unknown or unapproved step: {stepId}")
 
         # Resolve image bytes if not directly provided
         actualImageBytes = imageBytes if imageBytes is not None else self.contentResolver.resolveImageBytes(imageKey)
+        if not actualImageBytes:
+            # A missing or nonexistent image key must never pass
+            result = {
+                "schemaVersion": 1,
+                "checkpointId": f"chk-{stepId}-uncertain",
+                "sessionId": sessionId,
+                "stepId": stepId,
+                "verdict": "uncertain",
+                "confidence": 0.0,
+                "observed": [],
+                "missing": [],
+                "message": f"Checkpoint image is missing or unreachable: {imageKey}",
+                "correction": "Hold camera steady and capture required checkpoint photo"
+            }
+            validResult, resultError = validateSchema("checkpointResult", result)
+            if not validResult:
+                raise ValueError(f"Generated checkpoint result failed schema validation: {resultError}")
+            return result
 
         evaluation = self.visionEvaluator.evaluateImage(
             imageBytes=actualImageBytes,

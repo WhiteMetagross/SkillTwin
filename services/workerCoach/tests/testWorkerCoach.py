@@ -2,6 +2,7 @@ import io
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
+from PIL import Image
 import pytest
 from workerCoach.bedrockVisionEvaluator import BedrockVisionEvaluator
 from workerCoach.contentResolver import LocalContentResolver
@@ -184,7 +185,7 @@ def testBedrockVisionEvaluatorMockSuccess() -> None:
     assert "double bubble wrap" in result.observed
     assert result.correction is None
 
-def testBedrockVisionEvaluatorMalformedFallback() -> None:
+def testBedrockVisionEvaluatorMalformedReturnsUncertain() -> None:
     mockBedrock = MagicMock()
     badOutput = {
         "content": [
@@ -199,39 +200,45 @@ def testBedrockVisionEvaluatorMalformedFallback() -> None:
     }
     mockBedrock.invoke_model.return_value = mockResponse
 
-    localFallback = LocalCriteriaVisionEvaluator()
-    evaluator = BedrockVisionEvaluator(
-        bedrockClient=mockBedrock,
-        fallbackEvaluator=localFallback
-    )
-    dummyBytes = getAssetPath("correct_double_wrap.jpg").read_bytes()
+    evaluator = BedrockVisionEvaluator(bedrockClient=mockBedrock)
+
+    # Ordinary JPEG without byte markers
+    img = Image.new("RGB", (128, 128), color=(120, 140, 160))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    ordinaryBytes = buf.getvalue()
+
     criteria = {
         "actionCode": "addProtection",
         "instruction": "Wrap fragile item with two complete layers of bubble wrap"
     }
 
-    result = evaluator.evaluateImage(dummyBytes, criteria)
-    assert result.verdict == "pass"
-    assert result.confidence >= 0.9
+    result = evaluator.evaluateImage(ordinaryBytes, criteria)
+    assert result.verdict == "uncertain"
+    assert result.verdict != "pass"
+    assert result.confidence == 0.0
 
-def testBedrockVisionEvaluatorClientExceptionFallback() -> None:
+def testBedrockVisionEvaluatorClientExceptionReturnsUncertain() -> None:
     mockBedrock = MagicMock()
     mockBedrock.invoke_model.side_effect = RuntimeError("AWS Bedrock service error")
 
-    localFallback = LocalCriteriaVisionEvaluator()
-    evaluator = BedrockVisionEvaluator(
-        bedrockClient=mockBedrock,
-        fallbackEvaluator=localFallback
-    )
-    dummyBytes = getAssetPath("single_wrap_fail.jpg").read_bytes()
+    evaluator = BedrockVisionEvaluator(bedrockClient=mockBedrock)
+
+    # Ordinary JPEG without byte markers
+    img = Image.new("RGB", (128, 128), color=(120, 140, 160))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    ordinaryBytes = buf.getvalue()
+
     criteria = {
         "actionCode": "addProtection",
         "instruction": "Wrap fragile item with two complete layers of bubble wrap"
     }
 
-    result = evaluator.evaluateImage(dummyBytes, criteria)
-    assert result.verdict == "fail"
-    assert "second bubble wrap layer" in result.missing
+    result = evaluator.evaluateImage(ordinaryBytes, criteria)
+    assert result.verdict == "uncertain"
+    assert result.verdict != "pass"
+    assert result.confidence == 0.0
 
 def testLocalContentResolver() -> None:
     resolver = LocalContentResolver()
@@ -242,5 +249,72 @@ def testLocalContentResolver() -> None:
     unknownStep = resolver.resolveApprovedStep("step-999")
     assert unknownStep is None
 
-    fallbackImg = resolver.resolveImageBytes("nonexistent-key")
-    assert fallbackImg.startswith(b"\xff\xd8\xff")
+    missingImg = resolver.resolveImageBytes("nonexistent-key")
+    assert missingImg == b""
+
+def testBlankOrIrrelevantJpegReturnsUncertainInRealCheckpointMode() -> None:
+    evaluator = LocalCriteriaVisionEvaluator()
+    criteria = {
+        "actionCode": "addProtection",
+        "instruction": "Wrap fragile item with two complete layers of bubble wrap"
+    }
+
+    # Case 1: Solid black blank JPEG (stddev 0.0)
+    blackImg = Image.new("RGB", (100, 100), color=(0, 0, 0))
+    blackBuf = io.BytesIO()
+    blackImg.save(blackBuf, format="JPEG")
+    blackRes = evaluator.evaluateImage(blackBuf.getvalue(), criteria)
+    assert blackRes.verdict == "uncertain"
+    assert blackRes.confidence < 0.2
+
+    # Case 2: Solid white blank JPEG (stddev 0.0)
+    whiteImg = Image.new("RGB", (100, 100), color=(255, 255, 255))
+    whiteBuf = io.BytesIO()
+    whiteImg.save(whiteBuf, format="JPEG")
+    whiteRes = evaluator.evaluateImage(whiteBuf.getvalue(), criteria)
+    assert whiteRes.verdict == "uncertain"
+    assert whiteRes.confidence < 0.2
+
+    # Case 3: Irrelevant photo with variation but no verified packaging evidence
+    irrelevantImg = Image.new("RGB", (100, 100), color=(100, 150, 200))
+    for x in range(0, 100, 10):
+        for y in range(0, 100, 10):
+            irrelevantImg.putpixel((x, y), (250, 50, 50))
+    irrelevantBuf = io.BytesIO()
+    irrelevantImg.save(irrelevantBuf, format="JPEG")
+    irrelevantRes = evaluator.evaluateImage(irrelevantBuf.getvalue(), criteria)
+    assert irrelevantRes.verdict == "uncertain"
+    assert irrelevantRes.verdict != "pass"
+
+def testMissingImageUnknownStepOrDraftStepCannotPass() -> None:
+    reqPath = getFixturePath("checkpointRequest.valid.json")
+    with open(reqPath, "r", encoding="utf-8") as f:
+        request = json.load(f)
+
+    adapter = MockWorkerCoachAdapter()
+
+    # Case 1: Missing image bytes cannot pass
+    missingRes = adapter.evaluateRequestContent(request, imageBytes=b"")
+    assert missingRes["verdict"] == "uncertain"
+    assert missingRes["confidence"] == 0.0
+    assert missingRes["verdict"] != "pass"
+
+    # Case 2: Unknown step cannot pass
+    unknownStepReq = dict(request)
+    unknownStepReq["stepId"] = "step-unknown-999"
+    with pytest.raises(ValueError, match="unknown or unapproved step"):
+        adapter.evaluateRequestContent(unknownStepReq, imageBytes=b"valid_image_bytes")
+
+    # Case 3: Draft package step cannot pass
+    draftPath = getFixturePath("skillPackage.valid.json")
+    with open(draftPath, "r", encoding="utf-8") as f:
+        draftPkg = json.load(f)
+    assert draftPkg["status"] == "reviewRequired"
+    assert draftPkg["version"] == 0
+
+    draftResolver = LocalContentResolver(approvedPackage=draftPkg)
+    assert draftResolver.resolveApprovedStep("step-003") is None
+
+    draftAdapter = MockWorkerCoachAdapter(contentResolver=draftResolver)
+    with pytest.raises(ValueError, match="unknown or unapproved step"):
+        draftAdapter.evaluateRequestContent(request, imageBytes=b"valid_image_bytes")

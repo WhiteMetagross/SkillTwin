@@ -1,23 +1,22 @@
 import base64
 import json
 from typing import Any, Dict, Optional
-from .visionEvaluator import LocalCriteriaVisionEvaluator, VisionEvaluationResult, VisionEvaluator
+from .visionEvaluator import VisionEvaluationResult, VisionEvaluator
 
 class BedrockVisionEvaluator(VisionEvaluator):
     """
     Multimodal vision evaluator using Amazon Bedrock to verify worker execution photos.
-    Validates structured model responses and handles unreadable or malformed outputs safely.
+    Validates structured model responses and fails closed on provider, network, or parsing errors.
+    Never falls back to an evaluator that could produce an unearned pass verdict.
     """
 
     def __init__(
         self,
         bedrockClient: Optional[Any] = None,
-        modelId: str = "anthropic.claude-3-5-sonnet-20240620-v1:0",
-        fallbackEvaluator: Optional[VisionEvaluator] = None
+        modelId: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
     ) -> None:
         self.bedrockClient = bedrockClient
         self.modelId = modelId
-        self.fallbackEvaluator = fallbackEvaluator or LocalCriteriaVisionEvaluator()
 
     def _getClient(self) -> Any:
         if self.bedrockClient is not None:
@@ -31,13 +30,13 @@ class BedrockVisionEvaluator(VisionEvaluator):
         stepCriteria: Dict[str, Any],
         referenceImageBytes: Optional[bytes] = None
     ) -> VisionEvaluationResult:
-        if not imageBytes or len(imageBytes) < 10:
+        if not imageBytes or len(imageBytes) < 32:
             return VisionEvaluationResult(
                 verdict="uncertain",
-                confidence=0.1,
+                confidence=0.0,
                 observed=[],
                 missing=[],
-                message="Unreadable or corrupt image file, please capture another photo",
+                message="Missing or unreadable image file, please capture another photo",
                 correction="Ensure camera lens is clean and retry capture"
             )
 
@@ -97,8 +96,15 @@ class BedrockVisionEvaluator(VisionEvaluator):
             structured = json.loads(textOutput)
             return self._validateResult(structured)
         except Exception:
-            # Fallback to local criteria evaluator or return safe uncertain
-            return self.fallbackEvaluator.evaluateImage(imageBytes, stepCriteria, referenceImageBytes)
+            # Bedrock vision provider failure must fail closed by returning uncertain
+            return VisionEvaluationResult(
+                verdict="uncertain",
+                confidence=0.0,
+                observed=[],
+                missing=[],
+                message="Bedrock vision verification service unavailable, please retake photo",
+                correction="Hold camera steady and retake photo"
+            )
 
     def _validateResult(self, data: Dict[str, Any]) -> VisionEvaluationResult:
         verdict = data.get("verdict")

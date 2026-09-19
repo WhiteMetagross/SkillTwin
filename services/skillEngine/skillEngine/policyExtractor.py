@@ -21,14 +21,24 @@ class PolicyExtractor:
 class PdfPolicyExtractor(PolicyExtractor):
     """
     Local PDF policy extractor that reads text with page numbers and sections.
-    Extracts text page by page and identifies section headings.
+    Strictly validates PDF header and structure and fails closed on malformed or empty PDF files.
+    Never decodes arbitrary bytes into fake policy citations.
     """
 
     def extractDocument(self, documentId: str, content: bytes) -> PolicyDocument:
+        if not content or len(content) < 32:
+            raise ValueError(f"Empty or corrupted PDF document: {documentId}")
+
+        if not content.startswith(b"%PDF-"):
+            raise ValueError(f"Invalid PDF header in document: {documentId}")
+
         sections: List[PolicySection] = []
         try:
             import pypdf
             reader = pypdf.PdfReader(io.BytesIO(content))
+            if not reader.pages:
+                raise ValueError(f"PDF document contains zero pages: {documentId}")
+
             for pageNum, page in enumerate(reader.pages, start=1):
                 text = page.extract_text() or ""
                 lines = [line.strip() for line in text.split("\n") if line.strip()]
@@ -44,10 +54,13 @@ class PdfPolicyExtractor(PolicyExtractor):
                         sectionLines.append(line)
                 if sectionLines:
                     sections.append(PolicySection(documentId, pageNum, currentSection, " ".join(sectionLines)))
-        except Exception:
-            # Fallback for structured text content
-            text = content.decode("utf-8", errors="ignore")
-            sections.append(PolicySection(documentId, 1, "General requirements", text))
+        except Exception as exc:
+            if isinstance(exc, ValueError):
+                raise
+            raise ValueError(f"Failed to parse PDF document {documentId}: {exc}")
+
+        if not sections:
+            raise ValueError(f"No readable text sections found in PDF document: {documentId}")
 
         return PolicyDocument(documentId, sections)
 

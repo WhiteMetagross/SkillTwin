@@ -1,10 +1,12 @@
 import json
 from typing import Any, Dict, List, Optional
 from .modelCaller import LocalModelCaller, ModelCaller, ModelCompositionResult
+from .observationMapper import TEMPLATE_ACTIONS
 
 class BedrockModelCaller(ModelCaller):
     """
     Adapter invoking Amazon Bedrock foundation models to synthesize skill package instructions.
+    Grounds instructions strictly in observed evidence and exact policy citations.
     Validates model JSON and falls back safely to deterministic local synthesis on failure.
     """
 
@@ -74,11 +76,39 @@ class BedrockModelCaller(ModelCaller):
         observationsByAction: Dict[str, List[Dict[str, Any]]],
         citationsByAction: Dict[str, Optional[Dict[str, Any]]]
     ) -> str:
+        # Include bounded observation evidence for each action slot
+        obsEvidenceLines: List[str] = []
+        for action in TEMPLATE_ACTIONS:
+            obsList = observationsByAction.get(action, [])
+            if obsList:
+                actionsDesc = ", ".join([o.get("action", "") for o in obsList])
+                objectsDesc = ", ".join(list({obj for o in obsList for obj in o.get("visibleObjects", [])}))
+                obsEvidenceLines.append(f"- Slot '{action}': observed actions [{actionsDesc}], objects [{objectsDesc}]")
+            else:
+                obsEvidenceLines.append(f"- Slot '{action}': no video observations recorded")
+        obsSummary = "\n".join(obsEvidenceLines)
+
+        # Include exact policy citations for each action slot
+        policyCitationLines: List[str] = []
+        for action in TEMPLATE_ACTIONS:
+            citation = citationsByAction.get(action)
+            if citation:
+                policyCitationLines.append(
+                    f"- Slot '{action}': section '{citation.get('section')}', page {citation.get('page')}: \"{citation.get('excerpt')}\""
+                )
+            else:
+                policyCitationLines.append(f"- Slot '{action}': no policy citation")
+        citSummary = "\n".join(policyCitationLines)
+
         return (
-            f"You are a SkillTwin packing instruction synthesiser. "
-            f"Synthesize instructions for skill {skillId}. Return JSON with title, "
-            f"materials (array of strings), prerequisites (array of strings), "
-            f"and instructions (dictionary mapping action codes to concise instruction sentences)."
+            f"You are a SkillTwin packing instruction synthesiser for skill '{skillId}'.\n\n"
+            f"Observed video evidence:\n{obsSummary}\n\n"
+            f"Packaging policy requirements:\n{citSummary}\n\n"
+            f"Synthesize instructions strictly conforming to this evidence. Return JSON with:\n"
+            f"- title (string)\n"
+            f"- materials (array of strings)\n"
+            f"- prerequisites (array of strings)\n"
+            f"- instructions (dictionary mapping each action code in {TEMPLATE_ACTIONS} to a concise sentence)"
         )
 
     def _validateAndBuild(self, data: Dict[str, Any]) -> ModelCompositionResult:
@@ -95,5 +125,10 @@ class BedrockModelCaller(ModelCaller):
             raise ValueError("Malformed prerequisites in model output")
         if not isinstance(instructions, dict) or not instructions:
             raise ValueError("Malformed instructions in model output")
+
+        # Validate that instructions map canonical actions to valid strings
+        for action in TEMPLATE_ACTIONS:
+            if action not in instructions or not isinstance(instructions[action], str) or not instructions[action]:
+                raise ValueError(f"Missing or empty instruction for canonical action: {action}")
 
         return ModelCompositionResult(title, materials, prerequisites, instructions)

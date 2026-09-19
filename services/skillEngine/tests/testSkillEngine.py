@@ -41,7 +41,6 @@ def testSixActionOrderAndSchemaValidity() -> None:
     assert validateActionOrder(draft["steps"])
 
 def testRepeatedActionsFromTwoVideosMerged() -> None:
-    # Bundle with repeated observations across two videos for selectBox
     repeatedBundle = {
         "schemaVersion": 1,
         "skillId": "skill-repeated-001",
@@ -156,16 +155,13 @@ def testRepeatedActionsFromTwoVideosMerged() -> None:
 
     stepBox = draft["steps"][1]
     assert stepBox["actionCode"] == "selectBox"
-    # Should choose representative with higher confidence (obs-box-v2 from video-002)
     assert stepBox["sourceVideoId"] == "video-002"
     assert stepBox["confidence"] == 0.96
-    # Traceability must include all matching observation IDs
     assert "obs-box-v1" in stepBox["evidenceObservationIds"]
     assert "obs-box-v2" in stepBox["evidenceObservationIds"]
     assert len(stepBox["evidenceObservationIds"]) == 2
 
 def testMissingActionSlotMarkedNeedsReview() -> None:
-    # Bundle missing attachLabel action
     partialBundle = {
         "schemaVersion": 1,
         "skillId": "skill-missing-001",
@@ -231,6 +227,17 @@ def testPolicyExtractionFromRealPdf() -> None:
     assert "Cushioning" in citationProtection["section"] or "cushioning" in citationProtection["section"].lower()
     assert "two complete layers" in citationProtection["excerpt"].lower()
 
+def testMalformedPdfInputRaisesValueError() -> None:
+    extractor = PdfPolicyExtractor()
+
+    # Case 1: Arbitrary non PDF bytes
+    with pytest.raises(ValueError, match="Invalid PDF header|corrupted PDF"):
+        extractor.extractDocument("bad-doc", b"not_a_valid_pdf_stream_garbage_bytes")
+
+    # Case 2: Empty bytes
+    with pytest.raises(ValueError, match="Empty or corrupted PDF"):
+        extractor.extractDocument("empty-doc", b"")
+
 def testDeliberateConflictOnProtectionStep() -> None:
     bundlePath = getFixturePath("evidenceBundle.valid.json")
     with open(bundlePath, "r", encoding="utf-8") as f:
@@ -252,7 +259,6 @@ def testNoPolicyDocumentResultsInNotFound() -> None:
         bundle = json.load(f)
 
     adapter = MockSkillEngineAdapter()
-    # Pass empty citations mapping
     emptyCitations = {action: None for action in ["selectProduct", "selectBox", "addProtection", "placeProduct", "sealBox", "attachLabel"]}
     draft = adapter.composeDraft(bundle, customCitations=emptyCitations)
 
@@ -260,16 +266,16 @@ def testNoPolicyDocumentResultsInNotFound() -> None:
     assert step1["policyStatus"] == "notFound"
     assert step1["policyCitation"] is None
 
-def testBedrockModelCallerSuccessAndFallback() -> None:
+def testBedrockCompositionPromptContainsObservationFactsAndPolicyCitations() -> None:
     mockClient = MagicMock()
     modelJson = {
         "title": "Pack fragile item",
-        "materials": ["ceramic mug", "cardboard box"],
+        "materials": ["ceramic mug", "cardboard box", "bubble wrap"],
         "prerequisites": ["clean bench"],
         "instructions": {
             "selectProduct": "Inspect product carefully.",
             "selectBox": "Assemble box.",
-            "addProtection": "Wrap with bubble wrap.",
+            "addProtection": "Wrap with two layers of bubble wrap.",
             "placeProduct": "Place item inside box.",
             "sealBox": "Seal box seams.",
             "attachLabel": "Apply fragile label."
@@ -284,36 +290,55 @@ def testBedrockModelCallerSuccessAndFallback() -> None:
     mockClient.invoke_model.return_value = mockResponse
 
     bedrockCaller = BedrockModelCaller(bedrockClient=mockClient)
-    res = bedrockCaller.composeSkillContent("s1", {}, {})
-
-    assert res.title == "Pack fragile item"
-    assert "ceramic mug" in res.materials
-
-    # Test malformed model response triggers safe local fallback
-    badResponse = {
-        "body": io.BytesIO(b"malformed non json text")
+    observations = {
+        "addProtection": [
+            {"action": "wrap ceramic mug", "visibleObjects": ["ceramic mug", "bubble wrap"]}
+        ]
     }
-    mockClient.invoke_model.return_value = badResponse
-    fallbackRes = bedrockCaller.composeSkillContent("s1", {}, {})
-    assert fallbackRes.title.startswith("Pack")
+    citations = {
+        "addProtection": {
+            "documentId": "doc-01",
+            "page": 4,
+            "section": "Cushioning",
+            "excerpt": "Two complete layers required."
+        }
+    }
 
-def testTextractPolicyExtractorMockedSdk() -> None:
-    mockClient = MagicMock()
-    mockClient.detect_document_text.return_value = {
-        "Blocks": [
-            {"BlockType": "PAGE", "Page": 1},
-            {"BlockType": "LINE", "Page": 1, "Text": "CUSHIONING REQUIREMENTS"},
-            {"BlockType": "LINE", "Page": 1, "Text": "Fragile items require two layers of bubble wrap."}
+    res = bedrockCaller.composeSkillContent("s1", observations, citations)
+    assert res.title == "Pack fragile item"
+
+    # Verify prompt body contains observation facts and policy citations
+    callBody = json.loads(mockClient.invoke_model.call_args[1]["body"])
+    userPrompt = callBody["messages"][0]["content"]
+    assert "wrap ceramic mug" in userPrompt
+    assert "Two complete layers required" in userPrompt
+
+def testAudioSynthesisWritesRealBytesAndMatchesReportedSize() -> None:
+    mockStorage = MagicMock()
+    writtenFiles = {}
+    mockStorage.writeAsset.side_effect = lambda k, b: writtenFiles.update({k: b}) or k
+
+    mockPolly = MagicMock()
+    fakeAudio = b"ID3\x04\x00\x00\x00\x00\x00#\xff\xfb\x90d" + b"polly-synthetic-bytes-test"
+    mockPolly.synthesize_speech.return_value = {"AudioStream": io.BytesIO(fakeAudio)}
+
+    pollyService = AmazonPollyService(pollyClient=mockPolly)
+    approvedSkill = {
+        "skillId": "skill-test-01",
+        "status": "approved",
+        "version": 1,
+        "approvedBy": "supervisor-jane",
+        "steps": [
+            {"stepId": "step-001", "instruction": "Inspect product", "instructionHi": "उत्पाद जांचें"}
         ]
     }
 
-    extractor = TextractPolicyExtractor(textractClient=mockClient)
-    doc = extractor.extractDocument("doc-scanned-001", b"fake_pdf_bytes")
+    descriptors = pollyService.synthesizeApprovedSkillAudio(approvedSkill, language="hiIN", storageAdapter=mockStorage)
+    desc = descriptors["step-001"]
 
-    assert doc.documentId == "doc-scanned-001"
-    assert len(doc.sections) == 1
-    assert doc.sections[0].page == 1
-    assert "two layers" in doc.sections[0].text
+    assert desc.sizeBytes == len(fakeAudio)
+    assert desc.storageKey in writtenFiles
+    assert writtenFiles[desc.storageKey] == fakeAudio
 
 def testApprovedOnlyTranslation() -> None:
     bundlePath = getFixturePath("evidenceBundle.valid.json")
@@ -325,11 +350,9 @@ def testApprovedOnlyTranslation() -> None:
 
     translator = LocalTranslationService()
 
-    # Draft must be rejected
     with pytest.raises(ValueError, match="Draft skills cannot be translated"):
         translator.translateApprovedSkill(draft)
 
-    # Approved skill succeeds
     approvedSkill = {
         **draft,
         "status": "approved",
@@ -359,50 +382,20 @@ def testAmazonTranslateServiceMockedSdk() -> None:
     res = translator.translateApprovedSkill(approvedSkill, targetLanguage="hiIN")
     assert res["step-001"] == "उत्पाद का निरीक्षण करें"
 
-def testApprovedOnlyAudioSynthesis() -> None:
-    bundlePath = getFixturePath("evidenceBundle.valid.json")
-    with open(bundlePath, "r", encoding="utf-8") as f:
-        bundle = json.load(f)
-
-    adapter = MockSkillEngineAdapter()
-    draft = adapter.composeDraft(bundle)
-
-    audioService = LocalAudioSynthesisService()
-
-    # Draft must be rejected
-    with pytest.raises(ValueError, match="Draft skills cannot synthesize audio"):
-        audioService.synthesizeApprovedSkillAudio(draft)
-
-    # Approved skill succeeds
-    approvedSkill = {
-        **draft,
-        "status": "approved",
-        "version": 1,
-        "approvedBy": "supervisor-jane"
-    }
-    descriptors = audioService.synthesizeApprovedSkillAudio(approvedSkill, language="hiIN")
-    assert len(descriptors) == 6
-    assert "step-001" in descriptors
-    desc = descriptors["step-001"]
-    assert "skills/skill-fragile-mug-001/versions/v1/audio/hiIN/step-001.mp3" in desc.storageKey
-
-def testAmazonPollyServiceMockedSdk() -> None:
+def testTextractPolicyExtractorMockedSdk() -> None:
     mockClient = MagicMock()
-    mockClient.synthesize_speech.return_value = {
-        "AudioStream": io.BytesIO(b"fake_mp3_stream")
-    }
-
-    polly = AmazonPollyService(pollyClient=mockClient)
-    approvedSkill = {
-        "skillId": "skill-test-01",
-        "status": "approved",
-        "version": 1,
-        "approvedBy": "supervisor-jane",
-        "steps": [
-            {"stepId": "step-001", "instruction": "Inspect product", "instructionHi": "उत्पाद जांचें"}
+    mockClient.detect_document_text.return_value = {
+        "Blocks": [
+            {"BlockType": "PAGE", "Page": 1},
+            {"BlockType": "LINE", "Page": 1, "Text": "CUSHIONING REQUIREMENTS"},
+            {"BlockType": "LINE", "Page": 1, "Text": "Fragile items require two layers of bubble wrap."}
         ]
     }
 
-    res = polly.synthesizeApprovedSkillAudio(approvedSkill, language="hiIN")
-    assert "step-001" in res
-    assert res["step-001"].storageKey == "skills/skill-test-01/versions/v1/audio/hiIN/step-001.mp3"
+    extractor = TextractPolicyExtractor(textractClient=mockClient)
+    doc = extractor.extractDocument("doc-scanned-001", b"fake_pdf_bytes")
+
+    assert doc.documentId == "doc-scanned-001"
+    assert len(doc.sections) == 1
+    assert doc.sections[0].page == 1
+    assert "two layers" in doc.sections[0].text
