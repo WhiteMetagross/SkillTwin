@@ -13,6 +13,7 @@ from mediaIntelligence.audioDetector import AudioDetector
 from mediaIntelligence.bedrockObserver import BedrockObserver
 from mediaIntelligence.bundleComposer import BundleComposer
 from mediaIntelligence.cli import main as cliMain
+from mediaIntelligence.imageCaptioner import ImageCaption
 from mediaIntelligence.mockAdapter import MockMediaIntelligenceAdapter
 from mediaIntelligence.observer import (
     DeterministicMockObserver,
@@ -25,6 +26,7 @@ from mediaIntelligence.storage import LocalStorageAdapter, S3StorageAdapter
 from mediaIntelligence.transcriber import (
     AmazonTranscribeService,
     LocalTranscribeService,
+    TranscriptSegment,
     TranscriptionPendingError,
     TranscriptionProviderError,
     TranscriptionState
@@ -638,3 +640,144 @@ def testBedrockObserverFailsClosedOnError() -> None:
     observations = observer.observeVideo("v1", "skill-001", frames, [])
     # Must fail closed with empty list, never returning canned observations
     assert observations == []
+
+def bedrockResponse(items):
+    return {
+        "body": io.BytesIO(json.dumps({
+            "content": [{"type": "text", "text": json.dumps(items)}]
+        }).encode("utf-8"))
+    }
+
+def testBedrockObserverCoversWindowsWithLabeledFramesAndAlignedSpeech() -> None:
+    mockBedrock = MagicMock()
+    frameKeys = [f"skills/s1/derived/frames/v1/{timestamp}.jpg" for timestamp in (0, 1000, 2000, 3000)]
+    frames = [
+        SampledFrame("v1", timestamp, index, frameKeys[index], b"jpeg", 160, 120)
+        for index, timestamp in enumerate((0, 1000, 2000, 3000))
+    ]
+    mockBedrock.invoke_model.side_effect = [
+        bedrockResponse([{
+            "startMs": 0,
+            "endMs": 1500,
+            "beforeState": "mug on shelf",
+            "action": "pick mug",
+            "afterState": "mug on bench",
+            "visibleObjects": ["mug"],
+            "spokenEvidence": "pick the mug",
+            "candidateAction": "selectProduct",
+            "referenceFrameKey": frameKeys[0],
+            "confidence": 0.94
+        }]),
+        bedrockResponse([{
+            "startMs": 2000,
+            "endMs": 3500,
+            "beforeState": "open carton",
+            "action": "seal carton",
+            "afterState": "closed carton",
+            "visibleObjects": ["carton", "tape"],
+            "spokenEvidence": "seal the carton",
+            "candidateAction": "sealBox",
+            "referenceFrameKey": frameKeys[2],
+            "confidence": 0.91
+        }])
+    ]
+    observer = BedrockObserver(
+        bedrockClient=mockBedrock,
+        windowDurationMs=2000,
+        maxFramesPerWindow=2
+    )
+    segments = [
+        TranscriptSegment(500, 1500, "pick the mug"),
+        TranscriptSegment(2500, 3500, "seal the carton")
+    ]
+    references = [ImageCaption("ref-1", "refs/mug.jpg", "blue mug example", ["mug"])]
+
+    observations = observer.observeVideo(
+        "v1",
+        "s1",
+        frames,
+        segments,
+        references,
+        videoDurationMs=4000
+    )
+
+    assert [item.candidateAction for item in observations] == ["selectProduct", "sealBox"]
+    assert mockBedrock.invoke_model.call_count == 2
+    firstRequest = json.loads(mockBedrock.invoke_model.call_args_list[0].kwargs["body"])
+    secondRequest = json.loads(mockBedrock.invoke_model.call_args_list[1].kwargs["body"])
+    firstText = "\n".join(
+        block.get("text", "") for block in firstRequest["messages"][0]["content"]
+    )
+    secondText = "\n".join(
+        block.get("text", "") for block in secondRequest["messages"][0]["content"]
+    )
+    assert f"timestampMs=0 storageKey={frameKeys[0]}" in firstText
+    assert f"timestampMs=2000 storageKey={frameKeys[2]}" in secondText
+    assert "pick the mug" in firstText and "seal the carton" not in firstText
+    assert "seal the carton" in secondText and "pick the mug" not in secondText
+    assert "context only, never claim it was observed in video" in firstText
+
+def testBedrockObserverRejectsUngroundedOrIncompleteClaims() -> None:
+    frame = SampledFrame("v1", 0, 0, "skills/s1/frames/0.jpg", b"jpeg", 160, 120)
+    incomplete = {
+        "startMs": 0,
+        "endMs": 900,
+        "action": "inspect mug",
+        "afterState": "mug ready",
+        "visibleObjects": ["mug"],
+        "spokenEvidence": None,
+        "candidateAction": "selectProduct",
+        "referenceFrameKey": frame.storageKey,
+        "confidence": 0.9
+    }
+    mockBedrock = MagicMock()
+    mockBedrock.invoke_model.return_value = bedrockResponse([incomplete])
+    observer = BedrockObserver(bedrockClient=mockBedrock)
+    assert observer.observeVideo("v1", "s1", [frame], [], videoDurationMs=1000) == []
+
+    ungrounded = dict(incomplete, beforeState="mug on shelf", referenceFrameKey="other.jpg")
+    mockBedrock.invoke_model.return_value = bedrockResponse([ungrounded])
+    assert observer.observeVideo("v1", "s1", [frame], [], videoDurationMs=1000) == []
+
+def testFrameSamplingPlanBoundsCostAndCoversFullDuration() -> None:
+    sampler = VideoSampler(intervalMs=500)
+    timestamps = sampler.targetTimestamps(180000)
+
+    assert len(timestamps) == sampler.MAX_FRAMES
+    assert timestamps[0] == 0
+    assert 180000 - timestamps[-1] <= 1500
+    assert all(
+        later > earlier
+        for earlier, later in zip(timestamps, timestamps[1:])
+    )
+
+def testBundleComposerDeduplicatesOverlappingGroundedObservations(tmp_path: Path) -> None:
+    storage = LocalStorageAdapter(tmp_path)
+    firstKey = "skills/s1/frames/0.jpg"
+    secondKey = "skills/s1/frames/1000.jpg"
+    storage.writeAsset(firstKey, b"frame-one")
+    storage.writeAsset(secondKey, b"frame-two")
+    observations = [
+        Observation(
+            "pending-1", "v1", 0, 1200, "mug on shelf", "inspect mug",
+            "mug on bench", ["mug"], None, "selectProduct", firstKey, 0.8
+        ),
+        Observation(
+            "pending-2", "v1", 1000, 1800, "mug on shelf", "inspect mug",
+            "mug on bench", ["mug", "bench"], None, "selectProduct", secondKey, 0.9
+        )
+    ]
+
+    bundle = BundleComposer().composeBundle(
+        skillId="s1",
+        videoRecords=[{"videoId": "v1", "hasNarration": False, "transcriptKey": None}],
+        perVideoObservations={"v1": observations},
+        storageAdapter=storage,
+        videoDurationMap={"v1": 2000},
+        suppliedFrameKeysMap={"v1": {firstKey, secondKey}}
+    )
+
+    assert len(bundle["observations"]) == 1
+    assert bundle["observations"][0]["endMs"] == 1800
+    assert bundle["observations"][0]["referenceFrameKey"] == secondKey
+    assert bundle["observations"][0]["visibleObjects"] == ["mug", "bench"]
