@@ -45,13 +45,13 @@ The service provides both real media analysis and deterministic mock execution:
 ### Mock mode for fixture contracts
 
 ```bash
-python -m mediaIntelligence.cli --manifest ../../packages/contracts/fixtures/assetManifest.valid.json
+python -m mediaIntelligence.cli --mode mock --manifest ../../packages/contracts/fixtures/assetManifest.valid.json
 ```
 
 ### Real media mode with local assets
 
 ```bash
-python -m mediaIntelligence.cli --manifest tests/assets/testManifestReal.json --asset-root tests/assets
+python -m mediaIntelligence.cli --mode local --manifest tests/assets/testManifestReal.json --asset-root tests/assets
 ```
 
 ## Additional documentation

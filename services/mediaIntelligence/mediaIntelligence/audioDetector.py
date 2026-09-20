@@ -92,7 +92,8 @@ class AudioDetector:
             return False
 
         try:
-            # Extract up to 30 seconds of 16kHz mono 16 bit PCM directly to pipe
+            # Decode the complete clip. Video validation caps input duration at 180 seconds,
+            # so full-clip inspection remains bounded while still detecting delayed speech.
             decodeCmd = [
                 self.ffmpegPath,
                 "-v", "error",
@@ -100,7 +101,6 @@ class AudioDetector:
                 "-f", "s16le",
                 "-ac", "1",
                 "-ar", "16000",
-                "-t", "30",
                 "-"
             ]
             proc = subprocess.run(decodeCmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)

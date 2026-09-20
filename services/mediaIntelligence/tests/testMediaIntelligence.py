@@ -1,13 +1,18 @@
 import io
 import json
 from pathlib import Path
+import shutil
+import sys
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import MagicMock
+from unittest.mock import patch
 from PIL import Image
 import pytest
 from mediaIntelligence.audioDetector import AudioDetector
 from mediaIntelligence.bedrockObserver import BedrockObserver
 from mediaIntelligence.bundleComposer import BundleComposer
+from mediaIntelligence.cli import main as cliMain
 from mediaIntelligence.mockAdapter import MockMediaIntelligenceAdapter
 from mediaIntelligence.observer import (
     DeterministicMockObserver,
@@ -28,6 +33,11 @@ def getFixturePath(filename: str) -> Path:
 def getAssetPath(filename: str) -> Path:
     return Path(__file__).resolve().parent / "assets" / filename
 
+def createTempAssetRoot(tmp_path: Path, *filenames: str) -> Path:
+    for filename in filenames:
+        shutil.copy2(getAssetPath(filename), tmp_path / filename)
+    return tmp_path
+
 def testMockAdapterBaseline() -> None:
     manifestPath = getFixturePath("assetManifest.valid.json")
     with open(manifestPath, "r", encoding="utf-8") as f:
@@ -44,8 +54,18 @@ def testMockAdapterBaseline() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Evidence bundle schema error: {error}"
 
-def testProcessRealSilentVideo() -> None:
-    assetDir = getAssetPath("")
+def testCliRequiresExplicitRuntimeMode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["skilltwin-media-intelligence", "--manifest", "manifest.json"]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cliMain()
+    assert exc.value.code == 2
+
+def testProcessRealSilentVideo(tmp_path: Path) -> None:
+    assetDir = createTempAssetRoot(tmp_path, "silent_pack.mp4")
     manifest = {
         "schemaVersion": 1,
         "skillId": "skill-silent-001",
@@ -87,8 +107,8 @@ def testProcessRealSilentVideo() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Schema error: {error}"
 
-def testProcessRealNarratedVideo() -> None:
-    assetDir = getAssetPath("")
+def testProcessRealNarratedVideo(tmp_path: Path) -> None:
+    assetDir = createTempAssetRoot(tmp_path, "narrated_pack.mp4", "reference_mug.jpg")
     manifest = {
         "schemaVersion": 1,
         "skillId": "skill-narrated-001",
@@ -134,8 +154,8 @@ def testProcessRealNarratedVideo() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Schema error: {error}"
 
-def testProcessToneNoSpeechVideo() -> None:
-    assetDir = getAssetPath("")
+def testProcessToneNoSpeechVideo(tmp_path: Path) -> None:
+    assetDir = createTempAssetRoot(tmp_path, "tone_no_speech.mp4")
     manifest = {
         "schemaVersion": 1,
         "skillId": "skill-tone-001",
@@ -168,9 +188,14 @@ def testProcessToneNoSpeechVideo() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Schema error: {error}"
 
-def testProcessTwoVideosIndependently() -> None:
-    assetDir = getAssetPath("")
-    manifestPath = assetDir / "testManifestReal.json"
+def testProcessTwoVideosIndependently(tmp_path: Path) -> None:
+    assetDir = createTempAssetRoot(
+        tmp_path,
+        "narrated_pack.mp4",
+        "silent_pack.mp4",
+        "reference_mug.jpg"
+    )
+    manifestPath = getAssetPath("testManifestReal.json")
     with open(manifestPath, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
@@ -215,7 +240,7 @@ def testIdenticalNarratedBytesUnderDifferentFilenames() -> None:
         if tempPath.is_file():
             tempPath.unlink()
 
-def testCompletedTranscriptArtifactAndPendingJobRejection() -> None:
+def testCompletedTranscriptArtifactAndPendingJobRejection(tmp_path: Path) -> None:
     mockTranscribe = MagicMock()
     # Case 1: Job is IN_PROGRESS -> must not return a transcript key
     mockTranscribe.get_transcription_job.return_value = {
@@ -225,7 +250,7 @@ def testCompletedTranscriptArtifactAndPendingJobRejection() -> None:
     }
 
     service = AmazonTranscribeService(transcribeClient=mockTranscribe)
-    storage = LocalStorageAdapter(getAssetPath(""))
+    storage = LocalStorageAdapter(tmp_path)
 
     pendingKey, pendingSegs = service.transcribe("v1", "skill-001", None, storage)
     assert pendingKey is None
@@ -315,6 +340,70 @@ def testS3InputStagesLocallyForValidationAndSampling() -> None:
     # Cleanup removes the staged file
     adapter.cleanup()
     assert not stagedPath.is_file()
+
+def testS3StagingRemovesPartialFileOnDownloadFailure(tmp_path: Path) -> None:
+    class FailingBody:
+        def __init__(self) -> None:
+            self.readCount = 0
+            self.closed = False
+
+        def read(self, _size: int) -> bytes:
+            self.readCount += 1
+            if self.readCount == 1:
+                return b"partial"
+            raise OSError("simulated interrupted download")
+
+        def close(self) -> None:
+            self.closed = True
+
+    body = FailingBody()
+    mockS3 = MagicMock()
+    mockS3.head_object.return_value = {"ContentLength": 100}
+    mockS3.get_object.return_value = {"Body": body}
+    adapter = S3StorageAdapter("test-bucket", s3Client=mockS3, stagingRoot=tmp_path)
+
+    with pytest.raises(OSError, match="interrupted download"):
+        adapter.resolveLocalPath("skills/s1/source/videos/video.mp4")
+
+    assert list(tmp_path.iterdir()) == []
+    assert body.closed is True
+
+def testS3StagingRejectsLengthMismatchAndWrongOwnerPrefix(tmp_path: Path) -> None:
+    mockS3 = MagicMock()
+    mockS3.head_object.return_value = {"ContentLength": 4}
+    mockS3.get_object.return_value = {"Body": io.BytesIO(b"five!")}
+    adapter = S3StorageAdapter(
+        "test-bucket",
+        s3Client=mockS3,
+        allowedPrefix="skills/s1",
+        stagingRoot=tmp_path
+    )
+
+    with pytest.raises(ValueError, match="downloaded 5 bytes, expected 4"):
+        adapter.resolveLocalPath("skills/s1/source/videos/video.mp4")
+    assert list(tmp_path.iterdir()) == []
+
+    with pytest.raises(ValueError, match="outside allowed prefix"):
+        adapter.resolveLocalPath("skills/s2/source/videos/video.mp4")
+
+def testS3ReadAssetIsBounded() -> None:
+    mockS3 = MagicMock()
+    mockS3.get_object.return_value = {"Body": io.BytesIO(b"12345")}
+    adapter = S3StorageAdapter("test-bucket", s3Client=mockS3)
+    adapter.MAX_REMOTE_BYTES = 4
+
+    with pytest.raises(ValueError, match="byte limit"):
+        adapter.readAsset("skills/s1/derived/transcripts/video.json")
+
+def testAudioInspectionCoversCompleteValidatedClip() -> None:
+    pcm = b"\x01\x00" * 3200
+    with patch("mediaIntelligence.audioDetector.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout=pcm, stderr=b"")
+        detector = AudioDetector(ffmpegPath="ffmpeg")
+        detector._analyzeAcousticSpeech(Path("video.mp4"))
+
+    command = run.call_args.args[0]
+    assert "-t" not in command
 
 def testObserverIntervalExceedingVideoDurationRejection() -> None:
     composer = BundleComposer()
