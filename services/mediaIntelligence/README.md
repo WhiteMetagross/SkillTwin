@@ -54,6 +54,27 @@ python -m mediaIntelligence.cli --mode mock --manifest ../../packages/contracts/
 python -m mediaIntelligence.cli --mode local --manifest tests/assets/testManifestReal.json --asset-root tests/assets
 ```
 
+## Production container
+
+The container starts `mediaIntelligence.production`; it never selects local mocks. The worker
+requires `AWS_REGION`, `S3_MEDIA_BUCKET`, `TRANSCRIBE_OUTPUT_BUCKET`, and
+`BEDROCK_OBSERVER_MODEL_ID`. FFmpeg and ffprobe are installed in the image and configured through
+`FFMPEG_PATH` and `FFPROBE_PATH`.
+
+```bash
+docker build -t skilltwin-media services/mediaIntelligence
+docker run --rm \
+  -e AWS_REGION=ap-south-1 \
+  -e S3_MEDIA_BUCKET=skilltwin-media-storage \
+  -e TRANSCRIBE_OUTPUT_BUCKET=skilltwin-media-storage \
+  -e BEDROCK_OBSERVER_MODEL_ID=your-enabled-model-id \
+  skilltwin-media --manifest-key skills/skill-001/manifests/assets.json
+```
+
+The production worker exits with code `75` and a JSON payload containing the provider job name
+when Amazon Transcribe is queued or running. Orchestration should wait and retry that job; pending
+speech is never emitted as silence.
+
 ## Additional documentation
 
 - Central cloud requirements: [infrastructureRequirements.md](infrastructureRequirements.md)

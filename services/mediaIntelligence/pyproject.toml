@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "imageio-ffmpeg==0.6.0",
     "pytest==8.4.2"
 ]
 

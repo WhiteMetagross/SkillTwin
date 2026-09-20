@@ -20,8 +20,15 @@ from mediaIntelligence.observer import (
     Observation
 )
 from mediaIntelligence.pipeline import processAssetManifest
+from mediaIntelligence.production import ProductionConfig, buildProductionRuntime
 from mediaIntelligence.storage import LocalStorageAdapter, S3StorageAdapter
-from mediaIntelligence.transcriber import AmazonTranscribeService, LocalTranscribeService
+from mediaIntelligence.transcriber import (
+    AmazonTranscribeService,
+    LocalTranscribeService,
+    TranscriptionPendingError,
+    TranscriptionProviderError,
+    TranscriptionState
+)
 from mediaIntelligence.validator import validateSchema
 from mediaIntelligence.videoSampler import SampledFrame, VideoSampler
 from mediaIntelligence.videoValidator import VideoMetadata, VideoValidator
@@ -63,6 +70,62 @@ def testCliRequiresExplicitRuntimeMode(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit) as exc:
         cliMain()
     assert exc.value.code == 2
+
+def testProductionConfigFailsWhenRequiredProviderSettingsAreMissing(tmp_path: Path) -> None:
+    ffmpeg = tmp_path / "ffmpeg"
+    ffprobe = tmp_path / "ffprobe"
+    ffmpeg.touch()
+    ffprobe.touch()
+    environment = {
+        "AWS_REGION": "ap-south-1",
+        "S3_MEDIA_BUCKET": "media-bucket",
+        "TRANSCRIBE_OUTPUT_BUCKET": "transcript-bucket",
+        "FFMPEG_PATH": str(ffmpeg),
+        "FFPROBE_PATH": str(ffprobe)
+    }
+
+    with pytest.raises(RuntimeError, match="BEDROCK_OBSERVER_MODEL_ID"):
+        ProductionConfig.fromEnvironment(environment)
+
+def testProductionRuntimeUsesOnlyScopedAwsAdapters(tmp_path: Path) -> None:
+    ffmpeg = tmp_path / "ffmpeg"
+    ffprobe = tmp_path / "ffprobe"
+    ffmpeg.touch()
+    ffprobe.touch()
+    config = ProductionConfig.fromEnvironment({
+        "AWS_REGION": "ap-south-1",
+        "S3_MEDIA_BUCKET": "media-bucket",
+        "TRANSCRIBE_OUTPUT_BUCKET": "transcript-bucket",
+        "BEDROCK_OBSERVER_MODEL_ID": "test-model",
+        "FFMPEG_PATH": str(ffmpeg),
+        "FFPROBE_PATH": str(ffprobe)
+    })
+
+    class FakeSession:
+        def __init__(self, region_name: str) -> None:
+            self.regionName = region_name
+            self.clients = {}
+
+        def client(self, serviceName: str) -> MagicMock:
+            client = MagicMock(name=serviceName)
+            self.clients[serviceName] = client
+            return client
+
+    sessions = []
+
+    def sessionFactory(**kwargs):
+        session = FakeSession(kwargs["region_name"])
+        sessions.append(session)
+        return session
+
+    runtime = buildProductionRuntime("skill-001", config, sessionFactory=sessionFactory)
+
+    assert sessions[0].regionName == "ap-south-1"
+    assert runtime.storage.bucketName == "media-bucket"
+    assert runtime.storage.allowedPrefix == "skills/skill-001/"
+    assert runtime.transcriber.outputBucket == "transcript-bucket"
+    assert runtime.observer.modelId == "test-model"
+    assert set(sessions[0].clients) == {"s3", "transcribe", "bedrock-runtime"}
 
 def testProcessRealSilentVideo(tmp_path: Path) -> None:
     assetDir = createTempAssetRoot(tmp_path, "silent_pack.mp4")
@@ -252,9 +315,9 @@ def testCompletedTranscriptArtifactAndPendingJobRejection(tmp_path: Path) -> Non
     service = AmazonTranscribeService(transcribeClient=mockTranscribe)
     storage = LocalStorageAdapter(tmp_path)
 
-    pendingKey, pendingSegs = service.transcribe("v1", "skill-001", None, storage)
-    assert pendingKey is None
-    assert len(pendingSegs) == 0
+    with pytest.raises(TranscriptionPendingError) as pending:
+        service.transcribe("v1", "skill-001", None, storage)
+    assert pending.value.state == TranscriptionState.IN_PROGRESS
 
     # Case 2: Job is COMPLETED -> parses segments and writes artifact
     transcriptJsonContent = json.dumps({
@@ -273,6 +336,7 @@ def testCompletedTranscriptArtifactAndPendingJobRejection(tmp_path: Path) -> Non
     mockTranscribe.get_transcription_job.return_value = {
         "TranscriptionJob": {
             "TranscriptionJobStatus": "COMPLETED",
+            "LanguageCode": "en-IN",
             "Transcript": {
                 "TranscriptFileUri": transcriptJsonContent
             }
@@ -284,7 +348,103 @@ def testCompletedTranscriptArtifactAndPendingJobRejection(tmp_path: Path) -> Non
     assert len(compSegs) == 1
     assert compSegs[0].text == "Inspect ceramic mug"
     assert compSegs[0].startMs == 500
+    assert compSegs[0].languageCode == "en-IN"
     assert storage.assetExists(compKey) is True
+
+def testTranscribeStartsMissingJobWithExactSourceKeyAndLanguage(tmp_path: Path) -> None:
+    class ProviderException(Exception):
+        def __init__(self) -> None:
+            self.response = {
+                "Error": {
+                    "Code": "ResourceNotFoundException",
+                    "Message": "job not found"
+                }
+            }
+
+    mockTranscribe = MagicMock()
+    mockTranscribe.get_transcription_job.side_effect = ProviderException()
+    mockTranscribe.start_transcription_job.return_value = {
+        "TranscriptionJob": {"TranscriptionJobStatus": "QUEUED"}
+    }
+    service = AmazonTranscribeService(
+        transcribeClient=mockTranscribe,
+        sourceBucket="media-bucket",
+        outputBucket="output-bucket"
+    )
+
+    with pytest.raises(TranscriptionPendingError) as pending:
+        service.transcribe(
+            "video-001",
+            "skill-001",
+            None,
+            LocalStorageAdapter(tmp_path),
+            sourceKey="skills/skill-001/source/assets/asset-123",
+            sourceLanguage="hiIN"
+        )
+
+    assert pending.value.state == TranscriptionState.QUEUED
+    request = mockTranscribe.start_transcription_job.call_args.kwargs
+    assert request["Media"]["MediaFileUri"] == (
+        "s3://media-bucket/skills/skill-001/source/assets/asset-123"
+    )
+    assert request["LanguageCode"] == "hi-IN"
+    assert "IdentifyLanguage" not in request
+
+def testTranscribeDifferentiatesAccessDeniedFromMissingJob(tmp_path: Path) -> None:
+    class ProviderException(Exception):
+        def __init__(self) -> None:
+            self.response = {
+                "Error": {
+                    "Code": "AccessDeniedException",
+                    "Message": "not authorized"
+                }
+            }
+
+    mockTranscribe = MagicMock()
+    mockTranscribe.get_transcription_job.side_effect = ProviderException()
+    service = AmazonTranscribeService(transcribeClient=mockTranscribe)
+
+    with pytest.raises(TranscriptionProviderError) as denied:
+        service.transcribe("video-001", "skill-001", None, LocalStorageAdapter(tmp_path))
+
+    assert denied.value.code == "accessDenied"
+    mockTranscribe.start_transcription_job.assert_not_called()
+
+def testTranscribeAutoLanguageRequestAndFailedState(tmp_path: Path) -> None:
+    mockTranscribe = MagicMock()
+    mockTranscribe.start_transcription_job.return_value = {
+        "TranscriptionJob": {"TranscriptionJobStatus": "IN_PROGRESS"}
+    }
+    service = AmazonTranscribeService(
+        transcribeClient=mockTranscribe,
+        sourceBucket="media-bucket"
+    )
+    started = service.startTranscription(
+        "video-001",
+        "skill-001",
+        "skills/skill-001/source/video.mp4",
+        "auto"
+    )
+    request = mockTranscribe.start_transcription_job.call_args.kwargs
+    assert started.state == TranscriptionState.IN_PROGRESS
+    assert request["IdentifyLanguage"] is True
+    assert request["LanguageOptions"] == ["en-IN", "hi-IN"]
+
+    mockTranscribe.get_transcription_job.return_value = {
+        "TranscriptionJob": {
+            "TranscriptionJobStatus": "FAILED",
+            "FailureReason": "Unsupported media"
+        }
+    }
+    with pytest.raises(TranscriptionProviderError) as failed:
+        service.transcribe(
+            "video-001",
+            "skill-001",
+            None,
+            LocalStorageAdapter(tmp_path)
+        )
+    assert failed.value.code == "failed"
+    assert "Unsupported media" in str(failed.value)
 
 def testBlankOrIrrelevantFramesProduceNoCannedObservations() -> None:
     observer = LocalMediaObserver()
