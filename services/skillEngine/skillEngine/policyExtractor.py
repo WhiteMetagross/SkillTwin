@@ -75,7 +75,7 @@ class PolicyIndex:
     def indexDocument(self, document: PolicyDocument) -> None:
         self.sections.extend(document.sections)
 
-    def findCitation(self, actionCode: str) -> Optional[Dict[str, Any]]:
+    def findCitations(self, actionCode: str, limit: int = 3) -> List[Dict[str, Any]]:
         keywordMap = {
             "selectProduct": ["inspect", "surface flaws", "inspection"],
             "selectBox": ["box", "corrugated", "clearance"],
@@ -85,17 +85,42 @@ class PolicyIndex:
             "attachLabel": ["label", "fragile", "sticker"]
         }
 
+        if limit < 1:
+            return []
         keywords = keywordMap.get(actionCode, [])
+        ranked: List[tuple[int, int, PolicySection]] = []
         for section in self.sections:
             lowerText = section.text.lower()
             lowerSec = section.section.lower()
-            for kw in keywords:
-                if kw in lowerText or kw in lowerSec:
-                    # Return exact citation shape conforming to policyCitation schema
-                    return {
-                        "documentId": section.documentId,
-                        "page": section.page,
-                        "section": section.section,
-                        "excerpt": section.text[:120].strip()
-                    }
-        return None
+            textHits = sum(1 for keyword in keywords if keyword in lowerText)
+            headingHits = sum(1 for keyword in keywords if keyword in lowerSec)
+            score = textHits + (headingHits * 2)
+            if score:
+                ranked.append((score, -section.page, section))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [
+            {
+                "documentId": section.documentId,
+                "page": section.page,
+                "section": section.section,
+                "excerpt": section.text.strip()[:1000],
+            }
+            for _, _, section in ranked[:limit]
+        ]
+
+    def findCitation(self, actionCode: str) -> Optional[Dict[str, Any]]:
+        citations = self.findCitations(actionCode, limit=1)
+        return citations[0] if citations else None
+
+    def citationsByAction(self) -> Dict[str, Optional[Dict[str, Any]]]:
+        return {
+            actionCode: self.findCitation(actionCode)
+            for actionCode in (
+                "selectProduct",
+                "selectBox",
+                "addProtection",
+                "placeProduct",
+                "sealBox",
+                "attachLabel",
+            )
+        }

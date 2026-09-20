@@ -4,7 +4,15 @@ This service accepts an evidence bundle and composes a six step draft skill pack
 
 ## Implementation details
 
-The service uses a deterministic mock adapter that aligns observations to the six step template and flags policy citations and conflicts. It does not invoke live language models or PDF parsers. Pluggable interfaces allow future model calls and policy retrieval adapters.
+The local CLI uses a deterministic adapter for fixture-driven development. The production CLI reads an evidence bundle and policy documents from private S3, extracts page-accurate policy text (using asynchronous Textract for scanned PDFs), invokes Amazon Bedrock without mock fallback, validates grounding, and writes a schema-valid version 0 draft back to S3.
+
+Production requires `AWS_REGION`, `SKILLTWIN_BUCKET`, and `SKILL_ENGINE_MODEL_ID`:
+
+```bash
+skilltwin-skill-engine-production \
+  --evidence-bundle-key skills/example/evidence/evidenceBundle.json \
+  --policy-document-key skills/example/policies/warehouse-policy.pdf
+```
 
 ## CLI usage
 

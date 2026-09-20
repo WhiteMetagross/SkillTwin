@@ -5,7 +5,7 @@ from .audioService import (
     LocalAudioSynthesisService
 )
 from .bedrockCaller import BedrockModelCaller
-from .mockAdapter import MockPolicyRetriever, MockSkillEngineAdapter, PolicyRetriever
+from .mockAdapter import MockPolicyRetriever, MockSkillEngineAdapter, PolicyRetriever, SkillEngineAdapter
 from .modelCaller import LocalModelCaller, ModelCaller, ModelCompositionResult
 from .observationMapper import ActionEvidence, mapObservationsToActionSlots
 from .policyExtractor import (
@@ -17,6 +17,8 @@ from .policyExtractor import (
 )
 from .policyVerifier import PolicyVerificationResult, PolicyVerifier
 from .textractExtractor import TextractPolicyExtractor
+from .production import ProductionSkillEngine, buildProductionEngine
+from .storage import S3StorageAdapter, StorageAdapter
 from .translationService import (
     AmazonTranslateService,
     LocalTranslationService,
@@ -26,6 +28,7 @@ from .validator import validateActionOrder, validateSchema
 
 __all__ = [
     "MockSkillEngineAdapter",
+    "SkillEngineAdapter",
     "PolicyRetriever",
     "MockPolicyRetriever",
     "PolicyExtractor",
@@ -48,6 +51,10 @@ __all__ = [
     "LocalAudioSynthesisService",
     "AmazonPollyService",
     "AudioArtifactDescriptor",
+    "ProductionSkillEngine",
+    "buildProductionEngine",
+    "StorageAdapter",
+    "S3StorageAdapter",
     "validateSchema",
     "validateActionOrder"
 ]

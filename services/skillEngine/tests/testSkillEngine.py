@@ -8,8 +8,9 @@ from skillEngine.bedrockCaller import BedrockModelCaller
 from skillEngine.mockAdapter import MockSkillEngineAdapter
 from skillEngine.modelCaller import LocalModelCaller, ModelCompositionResult
 from skillEngine.observationMapper import mapObservationsToActionSlots
-from skillEngine.policyExtractor import PdfPolicyExtractor, PolicyIndex
+from skillEngine.policyExtractor import PdfPolicyExtractor, PolicyDocument, PolicyIndex, PolicySection
 from skillEngine.policyVerifier import PolicyVerifier
+from skillEngine.production import ProductionSkillEngine, buildProductionEngine
 from skillEngine.textractExtractor import TextractPolicyExtractor
 from skillEngine.translationService import AmazonTranslateService, LocalTranslationService
 from skillEngine.validator import validateActionOrder, validateSchema
@@ -312,6 +313,128 @@ def testBedrockCompositionPromptContainsObservationFactsAndPolicyCitations() -> 
     userPrompt = callBody["messages"][0]["content"]
     assert "wrap ceramic mug" in userPrompt
     assert "Two complete layers required" in userPrompt
+    assert "untrusted source data" in userPrompt
+
+
+def testBedrockCompositionFailsClosedWithoutExplicitFallback() -> None:
+    mockClient = MagicMock()
+    mockClient.invoke_model.side_effect = RuntimeError("provider unavailable")
+    caller = BedrockModelCaller(bedrockClient=mockClient)
+
+    with pytest.raises(RuntimeError, match="failed closed"):
+        caller.composeSkillContent("skill-1", {}, {})
+
+
+def testStrictBedrockGroundingRejectsInventedMaterial() -> None:
+    modelJson = {
+        "title": "Pack item",
+        "materials": ["diamond foam"],
+        "prerequisites": [],
+        "instructions": {
+            action: "Supervisor review is required."
+            for action in ["selectProduct", "selectBox", "addProtection", "placeProduct", "sealBox", "attachLabel"]
+        },
+    }
+    mockClient = MagicMock()
+    mockClient.invoke_model.return_value = {
+        "body": io.BytesIO(json.dumps({
+            "content": [{"type": "text", "text": json.dumps(modelJson)}]
+        }).encode("utf-8"))
+    }
+    caller = BedrockModelCaller(bedrockClient=mockClient, strictGrounding=True)
+
+    with pytest.raises(RuntimeError, match="Ungrounded material"):
+        caller.composeSkillContent("skill-1", {}, {})
+
+
+def testPolicyIndexRanksMultipleExactCandidates() -> None:
+    index = PolicyIndex()
+    index.indexDocument(PolicyDocument("policy-a", [
+        PolicySection("policy-a", 1, "General", "Keep the station clean."),
+        PolicySection("policy-a", 2, "CUSHIONING", "Fragile items require two complete layers of bubble wrap."),
+        PolicySection("policy-a", 3, "Materials", "Bubble wrap may be recycled when undamaged."),
+    ]))
+
+    candidates = index.findCitations("addProtection", limit=2)
+
+    assert len(candidates) == 2
+    assert candidates[0]["page"] == 2
+    assert candidates[0]["excerpt"] == "Fragile items require two complete layers of bubble wrap."
+
+
+def testAsyncTextractPollingAndPagination() -> None:
+    mockClient = MagicMock()
+    mockClient.start_document_text_detection.return_value = {"JobId": "textract-job-1"}
+    mockClient.get_document_text_detection.side_effect = [
+        {"JobStatus": "IN_PROGRESS"},
+        {
+            "JobStatus": "SUCCEEDED",
+            "Blocks": [
+                {"BlockType": "PAGE", "Page": 1},
+                {"BlockType": "LINE", "Page": 1, "Text": "INSPECTION"},
+            ],
+            "NextToken": "page-2",
+        },
+        {
+            "JobStatus": "SUCCEEDED",
+            "Blocks": [
+                {"BlockType": "PAGE", "Page": 2},
+                {"BlockType": "LINE", "Page": 2, "Text": "Two complete layers required."},
+            ],
+        },
+    ]
+    extractor = TextractPolicyExtractor(textractClient=mockClient)
+
+    document = extractor.extractS3Document(
+        "policy-scan",
+        "private-bucket",
+        "skills/s1/policies/scan.pdf",
+        maxPolls=3,
+        pollIntervalSeconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert [section.page for section in document.sections] == [1, 2]
+    assert document.sections[1].text == "Two complete layers required."
+    mockClient.start_document_text_detection.assert_called_once()
+
+
+def testProductionCompositionLoadsAndPersistsGroundedDraft() -> None:
+    bundle = json.loads(getFixturePath("evidenceBundle.valid.json").read_text(encoding="utf-8"))
+    assets = {
+        "skills/s1/evidence.json": json.dumps(bundle).encode("utf-8"),
+        "skills/s1/policies/policy.pdf": getAssetPath("samplePolicy.pdf").read_bytes(),
+    }
+
+    class MemoryStorage:
+        def readAsset(self, key: str) -> bytes:
+            return assets[key]
+
+        def writeAsset(self, key: str, data: bytes) -> str:
+            assets[key] = data
+            return key
+
+    engine = ProductionSkillEngine(
+        storage=MemoryStorage(),
+        bucket="private-bucket",
+        modelCaller=LocalModelCaller(),
+    )
+    result = engine.composeFromStorage(
+        "skills/s1/evidence.json",
+        ["skills/s1/policies/policy.pdf"],
+    )
+
+    draft = result["skillPackage"]
+    assert draft["status"] == "reviewRequired"
+    assert draft["version"] == 0
+    assert len(draft["steps"]) == 6
+    assert result["skillPackageKey"] in assets
+    assert json.loads(assets[result["skillPackageKey"]])["skillId"] == bundle["skillId"]
+
+
+def testProductionConfigurationIsRequired() -> None:
+    with pytest.raises(RuntimeError, match="AWS_REGION.*SKILLTWIN_BUCKET.*SKILL_ENGINE_MODEL_ID"):
+        buildProductionEngine({})
 
 def testAudioSynthesisWritesRealBytesAndMatchesReportedSize() -> None:
     mockStorage = MagicMock()
