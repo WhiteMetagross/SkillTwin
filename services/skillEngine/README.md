@@ -14,6 +14,8 @@ skilltwin-skill-engine-production \
   --policy-document-key skills/example/policies/warehouse-policy.pdf
 ```
 
+Approved versions can be published through `PublicationService`. It computes a canonical SHA-256 hash of the untouched approved snapshot, validates every Hindi translation, stores and reads back every Polly MP3, writes a separate published snapshot, and commits the publication manifest last. Repeating the same approved content returns the verified existing manifest without invoking providers again.
+
 ## CLI usage
 
 ```bash
