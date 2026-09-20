@@ -1,15 +1,25 @@
-import express from 'express'
 import cors from 'cors'
+import express from 'express'
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import type {
-  CheckpointRequest,
-  CheckpointResult,
-  ErrorResponse,
-  JobStatus,
-  SkillPackage
+import {
+  validateContract,
+  type CheckpointRequest,
+  type CheckpointResult,
+  type JobStatus,
+  type SkillPackage,
+  type SkillStep
 } from '@skilltwin/contracts'
+import { InMemorySkillRepository, type SkillRepository } from './repository.js'
+import {
+  authenticate,
+  errorResponse,
+  requestContext,
+  requireRole,
+  type RuntimeMode
+} from './runtime.js'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
@@ -20,240 +30,250 @@ function loadFixture<T>(fixtureFile: string): T {
   return JSON.parse(content) as T
 }
 
-export function createApp(): express.Application {
-  const app = express()
-  app.use(cors())
-  app.use(express.json())
+export interface AppOptions {
+  mode?: RuntimeMode
+  repository?: SkillRepository
+}
 
-  // In memory state initialized from contracts fixtures
-  const baseSkill = loadFixture<SkillPackage>('skillPackage.valid.json')
-  let currentSkill: SkillPackage = { ...baseSkill }
-  let currentJob = loadFixture<JobStatus>('jobStatus.valid.json')
-
-  const createRequestId = (): string => `req-${Date.now()}`
-
-  const notImplemented = (res: express.Response, message = 'Endpoint not implemented in mock skeleton') => {
-    const errorBody: ErrorResponse = {
-      schemaVersion: 1,
-      requestId: createRequestId(),
-      error: {
-        code: 'NOT_IMPLEMENTED',
-        message
-      }
-    }
-    return res.status(501).json(errorBody)
+function sendSkill(res: express.Response, skill: SkillPackage, status = 200): express.Response {
+  const validation = validateContract('skillPackage', skill)
+  if (!validation.valid) {
+    return errorResponse(
+      res,
+      500,
+      'CONTRACT_VIOLATION',
+      `Skill response failed contract validation: ${(validation.errors ?? []).join('; ')}`
+    )
   }
+  return res.status(status).json(skill)
+}
 
-  app.get('/skills', (_req, res) => {
-    return res.json([currentSkill])
-  })
+function editableStepPatch(body: unknown): Partial<SkillStep> {
+  if (!body || typeof body !== 'object') return {}
+  const input = body as Record<string, unknown>
+  const patch: Partial<SkillStep> = {}
+  if (typeof input.instruction === 'string') patch.instruction = input.instruction
+  if (typeof input.warning === 'string' || input.warning === null) patch.warning = input.warning
+  if (typeof input.checkpointRequired === 'boolean') {
+    patch.checkpointRequired = input.checkpointRequired
+  }
+  return patch
+}
 
-  app.post('/skills', (req, res) => {
-    const skillId = req.body?.skillId || `skill-${Date.now()}`
-    const title = req.body?.title || 'Untitled Skill'
-    currentSkill = {
-      ...baseSkill,
-      skillId,
+export function createApp(options: AppOptions = {}): express.Application {
+  const mode = options.mode ?? 'mock'
+  const baseSkill = loadFixture<SkillPackage>('skillPackage.valid.json')
+  const repository = options.repository ?? new InMemorySkillRepository([baseSkill])
+  const currentJob = loadFixture<JobStatus>('jobStatus.valid.json')
+
+  const app = express()
+  app.disable('x-powered-by')
+  app.use(cors())
+  app.use(express.json({ limit: '1mb' }))
+  app.use(requestContext())
+  app.use(authenticate(mode))
+
+  const notImplemented = (
+    res: express.Response,
+    message = 'Endpoint not implemented for the selected runtime mode'
+  ) => errorResponse(res, 501, 'NOT_IMPLEMENTED', message)
+
+  app.get('/skills', async (_req, res) => res.json(await repository.list()))
+
+  app.post('/skills', requireRole('supervisor'), async (req, res) => {
+    const title = typeof req.body?.title === 'string' && req.body.title.trim()
+      ? req.body.title.trim()
+      : 'Untitled Skill'
+    const skill: SkillPackage = {
+      ...structuredClone(baseSkill),
+      skillId: `skill-${randomUUID()}`,
       title,
       status: 'reviewRequired',
       version: 0,
       approvedBy: null,
       approvedAt: null
     }
-    return res.status(201).json(currentSkill)
+    await repository.save(skill)
+    return sendSkill(res, skill, 201)
   })
 
-  app.post('/skills/:skillId/assets/presign', (req, res) => {
-    const { skillId } = req.params
-    const fileType = req.body?.fileType || 'video/mp4'
-    const fileName = req.body?.fileName || 'upload.mp4'
+  app.post('/skills/:skillId/assets/presign', requireRole('supervisor'), (req, res) => {
+    if (mode !== 'mock') {
+      return notImplemented(res, 'Production S3 presigning is not configured')
+    }
+    const assetId = randomUUID()
+    const storageKey = `skills/${req.params.skillId}/source/${assetId}`
     return res.json({
-      uploadUrl: `https://mock-bucket.s3.local/skills/${skillId}/source/${fileName}`,
-      storageKey: `skills/${skillId}/source/${fileName}`,
-      fileType
+      assetId,
+      uploadUrl: `https://mock-bucket.s3.local/${storageKey}`,
+      storageKey,
+      fileType: typeof req.body?.fileType === 'string' ? req.body.fileType : 'video/mp4',
+      expiresInSeconds: 300
     })
   })
 
-  app.post('/skills/:skillId/assets/complete', (_req, res) => {
-    return notImplemented(res, 'Asset upload completion trigger not implemented in mock')
-  })
+  app.post(
+    '/skills/:skillId/assets/complete',
+    requireRole('supervisor'),
+    (_req, res) => notImplemented(res, 'Asset upload completion is not implemented')
+  )
 
-  app.post('/skills/:skillId/analyze', (_req, res) => {
-    return notImplemented(res, 'Step Functions analysis initiation not implemented in mock')
-  })
+  app.post(
+    '/skills/:skillId/analyze',
+    requireRole('supervisor'),
+    (_req, res) => notImplemented(res, 'Step Functions analysis initiation is not implemented')
+  )
 
   app.get('/skills/:skillId/jobs/latest', (req, res) => {
-    const { skillId } = req.params
-    return res.json({
-      ...currentJob,
-      skillId
-    })
+    return res.json({ ...currentJob, skillId: req.params.skillId })
   })
 
-  app.get('/skills/:skillId', (req, res) => {
-    const { skillId } = req.params
-    if (skillId !== currentSkill.skillId) {
-      const error: ErrorResponse = {
-        schemaVersion: 1,
-        requestId: createRequestId(),
-        error: {
-          code: 'RESOURCE_NOT_FOUND',
-          message: `Skill ${skillId} not found`
-        }
-      }
-      return res.status(404).json(error)
+  app.get('/skills/:skillId', async (req, res) => {
+    const skill = await repository.get(req.params.skillId)
+    if (!skill) {
+      return errorResponse(
+        res,
+        404,
+        'RESOURCE_NOT_FOUND',
+        `Skill ${req.params.skillId} not found`
+      )
     }
-    return res.json(currentSkill)
+    return sendSkill(res, skill)
   })
 
-  app.patch('/skills/:skillId/steps/:stepId', (req, res) => {
-    const { skillId, stepId } = req.params
-    if (skillId !== currentSkill.skillId) {
-      const error: ErrorResponse = {
-        schemaVersion: 1,
-        requestId: createRequestId(),
-        error: {
-          code: 'RESOURCE_NOT_FOUND',
-          message: `Skill ${skillId} not found`
-        }
-      }
-      return res.status(404).json(error)
+  app.patch('/skills/:skillId/steps/:stepId', requireRole('supervisor'), async (req, res) => {
+    const skillId = String(req.params.skillId)
+    const skill = await repository.get(skillId)
+    if (!skill) {
+      return errorResponse(
+        res,
+        404,
+        'RESOURCE_NOT_FOUND',
+        `Skill ${skillId} not found`
+      )
+    }
+    if (skill.status !== 'reviewRequired') {
+      return errorResponse(res, 409, 'IMMUTABLE_VERSION', 'Approved skill versions cannot be edited')
     }
 
-    const stepIndex = currentSkill.steps.findIndex((s) => s.stepId === stepId)
+    const stepIndex = skill.steps.findIndex((step) => step.stepId === req.params.stepId)
     if (stepIndex === -1) {
-      const error: ErrorResponse = {
-        schemaVersion: 1,
-        requestId: createRequestId(),
-        error: {
-          code: 'STEP_NOT_FOUND',
-          message: `Step ${stepId} not found`
-        }
-      }
-      return res.status(404).json(error)
+      return errorResponse(res, 404, 'STEP_NOT_FOUND', `Step ${req.params.stepId} not found`)
     }
 
-    const updatedStep = {
-      ...currentSkill.steps[stepIndex],
-      ...req.body,
-      stepId,
-      sequence: currentSkill.steps[stepIndex].sequence,
-      actionCode: currentSkill.steps[stepIndex].actionCode
-    }
-
-    currentSkill.steps[stepIndex] = updatedStep
+    const updatedStep = { ...skill.steps[stepIndex], ...editableStepPatch(req.body) }
+    skill.steps[stepIndex] = updatedStep
+    await repository.save(skill)
     return res.json(updatedStep)
   })
 
-  app.post('/skills/:skillId/approve', (req, res) => {
-    const { skillId } = req.params
-    const approver = req.body?.approvedBy || 'supervisor-default'
-    currentSkill = {
-      ...currentSkill,
-      skillId,
+  app.post('/skills/:skillId/approve', requireRole('supervisor'), async (req, res) => {
+    const skillId = String(req.params.skillId)
+    const skill = await repository.get(skillId)
+    if (!skill) {
+      return errorResponse(
+        res,
+        404,
+        'RESOURCE_NOT_FOUND',
+        `Skill ${skillId} not found`
+      )
+    }
+    const approved: SkillPackage = {
+      ...skill,
       status: 'approved',
-      version: currentSkill.version > 0 ? currentSkill.version + 1 : 1,
-      approvedBy: approver,
+      version: skill.version > 0 ? skill.version + 1 : 1,
+      approvedBy: req.identity!.userId,
       approvedAt: new Date().toISOString()
     }
-    return res.json(currentSkill)
+    await repository.save(approved)
+    return sendSkill(res, approved)
   })
 
-  app.post('/skills/:skillId/publish', (req, res) => {
-    const { skillId } = req.params
-    if (currentSkill.status !== 'approved' || currentSkill.version === 0) {
-      const error: ErrorResponse = {
-        schemaVersion: 1,
-        requestId: createRequestId(),
-        error: {
-          code: 'INVALID_STATE',
-          message: 'Only approved skills can be published'
-        }
-      }
-      return res.status(400).json(error)
+  app.post('/skills/:skillId/publish', requireRole('supervisor'), async (req, res) => {
+    const skillId = String(req.params.skillId)
+    const skill = await repository.get(skillId)
+    if (!skill) {
+      return errorResponse(
+        res,
+        404,
+        'RESOURCE_NOT_FOUND',
+        `Skill ${skillId} not found`
+      )
     }
-    currentSkill = {
-      ...currentSkill,
-      skillId,
-      status: 'published'
+    if (skill.status !== 'approved' || skill.version === 0) {
+      return errorResponse(res, 400, 'INVALID_STATE', 'Only approved skills can be published')
     }
-    return res.json(currentSkill)
+    const published: SkillPackage = { ...skill, status: 'published' }
+    await repository.save(published)
+    return sendSkill(res, published)
   })
 
-  app.get('/skills/:skillId/versions/:version', (req, res) => {
-    const { skillId, version } = req.params
-    const targetVersion = parseInt(version, 10)
-    if (currentSkill.skillId === skillId && currentSkill.version === targetVersion) {
-      return res.json(currentSkill)
-    }
-    const error: ErrorResponse = {
-      schemaVersion: 1,
-      requestId: createRequestId(),
-      error: {
-        code: 'VERSION_NOT_FOUND',
-        message: `Version ${version} for skill ${skillId} not found`
-      }
-    }
-    return res.status(404).json(error)
+  app.get('/skills/:skillId/versions/:version', async (req, res) => {
+    const skill = await repository.get(req.params.skillId)
+    const targetVersion = Number.parseInt(req.params.version, 10)
+    if (skill && skill.version === targetVersion) return sendSkill(res, skill)
+    return errorResponse(
+      res,
+      404,
+      'VERSION_NOT_FOUND',
+      `Version ${req.params.version} for skill ${req.params.skillId} not found`
+    )
   })
 
-  app.get('/skills/:skillId/pdf', (req, res) => {
-    const { skillId } = req.params
-    if (currentSkill.status === 'reviewRequired' || currentSkill.version === 0) {
-      const error: ErrorResponse = {
-        schemaVersion: 1,
-        requestId: createRequestId(),
-        error: {
-          code: 'DRAFT_NOT_EXPORTABLE',
-          message: 'Draft skills cannot be exported to PDF SOP'
-        }
-      }
-      return res.status(400).json(error)
+  app.get('/skills/:skillId/pdf', async (req, res) => {
+    const skill = await repository.get(req.params.skillId)
+    if (!skill) {
+      return errorResponse(
+        res,
+        404,
+        'RESOURCE_NOT_FOUND',
+        `Skill ${req.params.skillId} not found`
+      )
+    }
+    if (skill.status === 'reviewRequired' || skill.version === 0) {
+      return errorResponse(res, 400, 'DRAFT_NOT_EXPORTABLE', 'Draft skills cannot be exported')
     }
     return res.json({
-      exportKey: `skills/${skillId}/versions/v${currentSkill.version}/exports/sop.pdf`,
-      skillId,
-      title: currentSkill.title,
-      version: currentSkill.version,
+      exportKey: `skills/${skill.skillId}/versions/v${skill.version}/exports/sop.pdf`,
+      skillId: skill.skillId,
+      title: skill.title,
+      version: skill.version,
       pageCount: 7,
       generatedAt: new Date().toISOString()
     })
   })
 
-  app.post('/skills/:skillId/sessions', (req, res) => {
-    const { skillId } = req.params
-    const sessionId = `sess-${Date.now()}`
+  app.post('/skills/:skillId/sessions', async (req, res) => {
+    const skill = await repository.get(req.params.skillId)
+    if (!skill || skill.status !== 'published') {
+      return errorResponse(res, 409, 'SKILL_NOT_PUBLISHED', 'Worker sessions require a published skill')
+    }
     return res.status(201).json({
-      sessionId,
-      skillId,
+      sessionId: `sess-${randomUUID()}`,
+      skillId: skill.skillId,
+      version: skill.version,
+      workerId: req.identity!.userId,
       startedAt: new Date().toISOString(),
-      activeStepId: currentSkill.steps[0].stepId
+      activeStepId: skill.steps[0].stepId
     })
   })
 
   app.post('/sessions/:sessionId/checkpoints', (req, res) => {
-    const { sessionId } = req.params
     const body = req.body as Partial<CheckpointRequest>
     const stepId = body.stepId || 'step-003'
-    const verdict = req.query.mockVerdict as string || 'pass'
-
-    if (verdict === 'fail') {
-      const failResult = loadFixture<CheckpointResult>('checkpointResult.fail.valid.json')
-      return res.json({ ...failResult, sessionId, stepId })
-    }
-    if (verdict === 'uncertain') {
-      const uncResult = loadFixture<CheckpointResult>('checkpointResult.uncertain.valid.json')
-      return res.json({ ...uncResult, sessionId, stepId })
-    }
-
-    const passResult = loadFixture<CheckpointResult>('checkpointResult.pass.valid.json')
-    return res.json({ ...passResult, sessionId, stepId })
+    const verdict = mode === 'mock' ? String(req.query.mockVerdict || 'pass') : 'pass'
+    const fixture = verdict === 'fail'
+      ? 'checkpointResult.fail.valid.json'
+      : verdict === 'uncertain'
+        ? 'checkpointResult.uncertain.valid.json'
+        : 'checkpointResult.pass.valid.json'
+    const result = loadFixture<CheckpointResult>(fixture)
+    return res.json({ ...result, sessionId: req.params.sessionId, stepId })
   })
 
   app.post('/sessions/:sessionId/complete', (req, res) => {
-    const { sessionId } = req.params
     return res.json({
-      sessionId,
+      sessionId: req.params.sessionId,
       status: 'completed',
       completedAt: new Date().toISOString(),
       stepsVerified: 6,
@@ -261,9 +281,6 @@ export function createApp(): express.Application {
     })
   })
 
-  app.use((_req, res) => {
-    return notImplemented(res)
-  })
-
+  app.use((_req, res) => notImplemented(res))
   return app
 }
