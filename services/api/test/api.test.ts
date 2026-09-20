@@ -6,6 +6,8 @@ import { createApp } from '../src/app.js'
 
 let server: Server
 let baseUrl: string
+let productionServer: Server
+let productionBaseUrl: string
 
 test.before(async () => {
   const app = createApp()
@@ -16,15 +18,33 @@ test.before(async () => {
       resolve()
     })
   })
+  const productionApp = createApp({ mode: 'production' })
+  await new Promise<void>((resolve) => {
+    productionServer = productionApp.listen(0, () => {
+      const addr = productionServer.address() as AddressInfo
+      productionBaseUrl = `http://localhost:${addr.port}`
+      resolve()
+    })
+  })
 })
 
 test.after(async () => {
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => {
-      if (err) reject(err)
-      else resolve()
+  await Promise.all([server, productionServer].map((target) => (
+    new Promise<void>((resolve, reject) => {
+      target.close((err) => {
+        if (err) reject(err)
+        else resolve()
+      })
     })
-  })
+  )))
+})
+
+test('production mode requires an authenticated identity', async () => {
+  const res = await fetch(`${productionBaseUrl}/skills`)
+  assert.strictEqual(res.status, 401)
+  const data = await res.json()
+  assert.strictEqual(data.error.code, 'UNAUTHENTICATED')
+  assert.strictEqual(data.requestId, res.headers.get('x-request-id'))
 })
 
 test('GET /skills returns list containing skill draft', async () => {
@@ -41,6 +61,7 @@ test('GET /skills/:skillId returns 404 with errorResponse for unknown skill', as
   const data = await res.json()
   assert.strictEqual(data.schemaVersion, 1)
   assert.strictEqual(data.error.code, 'RESOURCE_NOT_FOUND')
+  assert.strictEqual(data.requestId, res.headers.get('x-request-id'))
 })
 
 test('POST unimplemented routes returns 501 with safe error response', async () => {
@@ -56,14 +77,31 @@ test('POST unimplemented routes returns 501 with safe error response', async () 
 test('POST /skills/:skillId/approve transitions draft to approved', async () => {
   const res = await fetch(`${baseUrl}/skills/skill-fragile-mug-001/approve`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ approvedBy: 'supervisor-test' })
+    headers: {
+      'Content-Type': 'application/json',
+      'x-user-id': 'supervisor-authenticated',
+      'x-user-role': 'supervisor'
+    },
+    body: JSON.stringify({ approvedBy: 'spoofed-client-value' })
   })
   assert.strictEqual(res.status, 200)
   const data = await res.json()
   assert.strictEqual(data.status, 'approved')
   assert.strictEqual(data.version, 1)
-  assert.strictEqual(data.approvedBy, 'supervisor-test')
+  assert.strictEqual(data.approvedBy, 'supervisor-authenticated')
+})
+
+test('worker role cannot approve a skill', async () => {
+  const res = await fetch(`${baseUrl}/skills/skill-fragile-mug-001/approve`, {
+    method: 'POST',
+    headers: {
+      'x-user-id': 'worker-test',
+      'x-user-role': 'worker'
+    }
+  })
+  assert.strictEqual(res.status, 403)
+  const data = await res.json()
+  assert.strictEqual(data.error.code, 'FORBIDDEN')
 })
 
 test('POST /sessions/:sessionId/checkpoints returns checkpoint result', async () => {
