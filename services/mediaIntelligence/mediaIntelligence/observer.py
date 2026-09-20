@@ -125,8 +125,6 @@ class LocalMediaObserver(MediaObserver):
 
         # Inspect pixels across all sampled frames
         validFrameAnalyses = []
-        suppliedFrameKeys = {f.storageKey for f in frames}
-
         for frame in frames:
             try:
                 img = Image.open(io.BytesIO(frame.imageBytes)).convert("RGB")

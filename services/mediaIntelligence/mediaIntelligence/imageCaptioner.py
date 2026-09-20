@@ -25,6 +25,19 @@ class ImageCaptioner:
     def captionImage(self, imageId: str, sourceKey: str, imageBytes: bytes) -> ImageCaption:
         raise NotImplementedError("Subclasses must implement captionImage")
 
+class ValidatedImageCaptioner(ImageCaptioner):
+    """Production-safe metadata adapter; it makes no semantic visual claims."""
+
+    def captionImage(self, imageId: str, sourceKey: str, imageBytes: bytes) -> ImageCaption:
+        if not imageBytes:
+            raise ValueError(f"Reference image is empty: {imageId}")
+        return ImageCaption(
+            imageId=imageId,
+            sourceKey=sourceKey,
+            caption=f"Validated reference image {imageId}",
+            detectedObjects=[]
+        )
+
 class LocalImageCaptioner(ImageCaptioner):
     """
     Local reference image captioner.

@@ -31,7 +31,8 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install jsonschema pytest
+          pip install --requirement services/mediaIntelligence/requirements.lock
+          pip install pytest==8.3.5
 
       - name: Build TypeScript packages
         run: npm run build
@@ -47,6 +48,12 @@ jobs:
 
       - name: Run media intelligence tests
         run: pytest services/mediaIntelligence
+
+      - name: Build media intelligence container
+        run: docker build --file services/mediaIntelligence/Dockerfile --tag skilltwin-media:test .
+
+      - name: Smoke test media intelligence container
+        run: docker run --rm skilltwin-media:test python tests/containerSmoke.py
 
       - name: Run skill engine tests
         run: pytest services/skillEngine

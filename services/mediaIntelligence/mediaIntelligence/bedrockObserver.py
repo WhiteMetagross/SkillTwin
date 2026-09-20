@@ -2,6 +2,7 @@ import base64
 import json
 from typing import Any, Dict, List, Optional
 from .imageCaptioner import ImageCaption
+from .errors import ObservationProviderError
 from .observer import ALLOWED_CANDIDATE_ACTIONS, MediaObserver, Observation
 from .transcriber import TranscriptSegment
 from .videoSampler import SampledFrame
@@ -13,6 +14,8 @@ class BedrockObserver(MediaObserver):
     Validates model output and fails closed on provider or parsing errors.
     Never falls back to canned observations on provider failure.
     """
+
+    MAX_RESPONSE_BYTES = 1024 * 1024
 
     def __init__(
         self,
@@ -96,7 +99,9 @@ class BedrockObserver(MediaObserver):
                 body=json.dumps(bodyPayload)
             )
 
-            rawBody = response["body"].read()
+            rawBody = response["body"].read(self.MAX_RESPONSE_BYTES + 1)
+            if len(rawBody) > self.MAX_RESPONSE_BYTES:
+                raise ValueError("Bedrock response exceeds 1 MiB limit")
             parsed = json.loads(rawBody)
 
             contentBlocks = parsed.get("content", [])
@@ -148,6 +153,6 @@ class BedrockObserver(MediaObserver):
                 )
 
             return validObservations
-        except Exception:
-            # Never fall back to canned observations on Bedrock failure
-            return []
+        except Exception as exc:
+            # Never hide provider failures or fall back to canned observations.
+            raise ObservationProviderError(f"Bedrock observation failed for video '{videoId}'") from exc

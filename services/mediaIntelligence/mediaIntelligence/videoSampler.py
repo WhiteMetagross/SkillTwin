@@ -23,14 +23,32 @@ class SampledFrame:
         self.width = width
         self.height = height
 
+    def toManifestEntry(self) -> dict:
+        return {
+            "videoId": self.videoId,
+            "timestampMs": self.timestampMs,
+            "frameIndex": self.frameIndex,
+            "storageKey": self.storageKey,
+            "width": self.width,
+            "height": self.height,
+            "sizeBytes": len(self.imageBytes),
+        }
+
 class VideoSampler:
     """
     Samples video frames at configured intervals of roughly one to two seconds.
     Writes representative JPEG image artifacts to storage using standardized keys.
     """
 
-    def __init__(self, intervalMs: int = 1500) -> None:
+    MAX_FRAMES = 120
+    MAX_FRAME_BYTES = 4 * 1024 * 1024
+    MAX_TOTAL_FRAME_BYTES = 64 * 1024 * 1024
+
+    def __init__(self, intervalMs: int = 1500, maxFrames: int = MAX_FRAMES) -> None:
         self.intervalMs = max(500, intervalMs)
+        if maxFrames <= 0 or maxFrames > self.MAX_FRAMES:
+            raise ValueError(f"maxFrames must be between 1 and {self.MAX_FRAMES}")
+        self.maxFrames = maxFrames
 
     def sampleFrames(
         self,
@@ -47,11 +65,16 @@ class VideoSampler:
         fps = metadata.fps if metadata.fps > 0 else 25.0
         totalDurationMs = metadata.durationMs
         videoId = metadata.videoId
+        effectiveIntervalMs = max(
+            self.intervalMs,
+            (totalDurationMs + self.maxFrames - 1) // self.maxFrames,
+        )
+        totalFrameBytes = 0
 
         try:
             # Determine target timestamps spaced at intervalMs
             currentTs = 0
-            while currentTs < totalDurationMs:
+            while currentTs < totalDurationMs and len(frames) < self.maxFrames:
                 frameIdx = int((currentTs / 1000.0) * fps)
                 cap.set(cv2.CAP_PROP_POS_MSEC, float(currentTs))
                 success, frame = cap.read()
@@ -64,10 +87,17 @@ class VideoSampler:
                 qualityParams = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
                 encodedOk, buffer = cv2.imencode(".jpg", frame, qualityParams)
                 if not encodedOk:
-                    currentTs += self.intervalMs
+                    currentTs += effectiveIntervalMs
                     continue
 
                 jpegBytes = buffer.tobytes()
+                if len(jpegBytes) > self.MAX_FRAME_BYTES:
+                    raise ValueError(
+                        f"Sampled frame at {currentTs}ms exceeds {self.MAX_FRAME_BYTES} byte limit"
+                    )
+                totalFrameBytes += len(jpegBytes)
+                if totalFrameBytes > self.MAX_TOTAL_FRAME_BYTES:
+                    raise ValueError("Sampled frame set exceeds total in-memory work limit")
                 storageKey = f"skills/{skillId}/derived/frames/{videoId}/{currentTs}.jpg"
                 storageAdapter.writeAsset(storageKey, jpegBytes)
 
@@ -84,7 +114,7 @@ class VideoSampler:
                     )
                 )
 
-                currentTs += self.intervalMs
+                currentTs += effectiveIntervalMs
 
             # Ensure at least one frame was sampled
             if not frames:
