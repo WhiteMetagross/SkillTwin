@@ -48,7 +48,7 @@ class MockPolicyRetriever(PolicyRetriever):
             }
         }
 
-class MockSkillEngineAdapter:
+class SkillEngineAdapter:
     """
     Adapter for skill engine service.
     Maps evidence bundle observations across videos into the six step fragile packing template.
@@ -164,3 +164,7 @@ class MockSkillEngineAdapter:
             raise ValueError(f"Composed draft failed schema validation: {draftError}")
 
         return draft
+
+
+class MockSkillEngineAdapter(SkillEngineAdapter):
+    """Explicit local/demo adapter retaining deterministic default dependencies."""
