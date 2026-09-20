@@ -11,6 +11,7 @@ from skillEngine.observationMapper import mapObservationsToActionSlots
 from skillEngine.policyExtractor import PdfPolicyExtractor, PolicyDocument, PolicyIndex, PolicySection
 from skillEngine.policyVerifier import PolicyVerifier
 from skillEngine.production import ProductionSkillEngine, buildProductionEngine
+from skillEngine.publication import PublicationService
 from skillEngine.textractExtractor import TextractPolicyExtractor
 from skillEngine.translationService import AmazonTranslateService, LocalTranslationService
 from skillEngine.validator import validateActionOrder, validateSchema
@@ -440,6 +441,7 @@ def testAudioSynthesisWritesRealBytesAndMatchesReportedSize() -> None:
     mockStorage = MagicMock()
     writtenFiles = {}
     mockStorage.writeAsset.side_effect = lambda k, b: writtenFiles.update({k: b}) or k
+    mockStorage.readAsset.side_effect = lambda k: writtenFiles[k]
 
     mockPolly = MagicMock()
     fakeAudio = b"ID3\x04\x00\x00\x00\x00\x00#\xff\xfb\x90d" + b"polly-synthetic-bytes-test"
@@ -504,6 +506,120 @@ def testAmazonTranslateServiceMockedSdk() -> None:
 
     res = translator.translateApprovedSkill(approvedSkill, targetLanguage="hiIN")
     assert res["step-001"] == "उत्पाद का निरीक्षण करें"
+
+
+def testAmazonTranslateRejectsEmptyOutput() -> None:
+    mockClient = MagicMock()
+    mockClient.translate_text.return_value = {"TranslatedText": ""}
+    translator = AmazonTranslateService(translateClient=mockClient)
+    approvedSkill = {
+        "status": "approved",
+        "version": 1,
+        "approvedBy": "supervisor-jane",
+        "steps": [{"stepId": "step-001", "instruction": "Inspect product"}],
+    }
+
+    with pytest.raises(RuntimeError, match="empty result"):
+        translator.translateApprovedSkill(approvedSkill)
+
+
+def testAmazonTranslatePreservesConfiguredTechnicalTerms() -> None:
+    mockClient = MagicMock()
+    mockClient.translate_text.return_value = {"TranslatedText": "बॉक्स को सील करें"}
+    translator = AmazonTranslateService(
+        translateClient=mockClient,
+        fixedTerms=["H tape"],
+    )
+    approvedSkill = {
+        "status": "approved",
+        "version": 1,
+        "approvedBy": "supervisor-jane",
+        "steps": [{"stepId": "step-001", "instruction": "Seal with H tape"}],
+    }
+
+    with pytest.raises(RuntimeError, match="H tape"):
+        translator.translateApprovedSkill(approvedSkill)
+
+
+def testPollyRejectsEmptyAudioInsteadOfFabricatingBytes() -> None:
+    mockPolly = MagicMock()
+    mockPolly.synthesize_speech.return_value = {"AudioStream": io.BytesIO(b"")}
+    storage = MagicMock()
+    storage.writeAsset.side_effect = lambda key, data: key
+    storage.readAsset.return_value = b""
+    service = AmazonPollyService(pollyClient=mockPolly)
+    approvedSkill = {
+        "skillId": "skill-1",
+        "status": "approved",
+        "version": 1,
+        "approvedBy": "supervisor-jane",
+        "steps": [{"stepId": "step-001", "instructionHi": "उत्पाद जांचें"}],
+    }
+
+    with pytest.raises(RuntimeError, match="invalid MP3"):
+        service.synthesizeApprovedSkillAudio(approvedSkill, storageAdapter=storage)
+
+
+def testPollyStrictlyRejectsDraftSkill() -> None:
+    service = AmazonPollyService(pollyClient=MagicMock())
+    with pytest.raises(ValueError, match="Draft skills cannot synthesize audio"):
+        service.synthesizeApprovedSkillAudio(
+            {"status": "reviewRequired", "version": 0, "approvedBy": None, "steps": []},
+            storageAdapter=MagicMock(),
+        )
+
+
+def testPublicationIsIdempotentAndPreservesApprovedSnapshot() -> None:
+    approvedSkill = json.loads(
+        getFixturePath("skillPackage.approved.valid.json").read_text(encoding="utf-8")
+    )
+    original = json.loads(json.dumps(approvedSkill))
+
+    class MemoryStorage:
+        def __init__(self) -> None:
+            self.assets = {"skills/s1/sop/v1.pdf": b"%PDF-verified"}
+
+        def readAsset(self, key: str) -> bytes:
+            return self.assets[key]
+
+        def writeAsset(self, key: str, data: bytes) -> str:
+            self.assets[key] = data
+            return key
+
+        def assetExists(self, key: str) -> bool:
+            return key in self.assets
+
+    storage = MemoryStorage()
+    translateClient = MagicMock()
+    translateClient.translate_text.side_effect = lambda **request: {
+        "TranslatedText": f"{request['Text']} हिंदी"
+    }
+    pollyClient = MagicMock()
+    pollyClient.synthesize_speech.side_effect = lambda **_: {
+        "AudioStream": io.BytesIO(b"ID3\x04\x00\x00\x00\x00\x00#published-audio")
+    }
+    service = PublicationService(
+        translator=AmazonTranslateService(
+            translateClient=translateClient,
+            fixedTerms=[],
+        ),
+        audioService=AmazonPollyService(pollyClient=pollyClient),
+        storage=storage,
+    )
+
+    first = service.publishApprovedSkill(approvedSkill, ["skills/s1/sop/v1.pdf"])
+    second = service.publishApprovedSkill(approvedSkill, ["skills/s1/sop/v1.pdf"])
+
+    assert first == second
+    assert approvedSkill == original
+    assert first["approvedContentHash"] == PublicationService.approvedContentHash(original)
+    assert len(first["translationKeys"]) == 6
+    assert len(first["audioArtifacts"]) == 6
+    assert translateClient.translate_text.call_count == 6
+    assert pollyClient.synthesize_speech.call_count == 6
+    published = json.loads(storage.assets[first["publishedSkillKey"]])
+    assert published["status"] == "published"
+    assert all(step["instructionHi"] and step["audioKey"] for step in published["steps"])
 
 def testTextractPolicyExtractorMockedSdk() -> None:
     mockClient = MagicMock()

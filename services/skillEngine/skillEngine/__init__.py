@@ -18,6 +18,7 @@ from .policyExtractor import (
 from .policyVerifier import PolicyVerificationResult, PolicyVerifier
 from .textractExtractor import TextractPolicyExtractor
 from .production import ProductionSkillEngine, buildProductionEngine
+from .publication import PublicationService, buildProductionPublisher
 from .storage import S3StorageAdapter, StorageAdapter
 from .translationService import (
     AmazonTranslateService,
@@ -53,6 +54,8 @@ __all__ = [
     "AudioArtifactDescriptor",
     "ProductionSkillEngine",
     "buildProductionEngine",
+    "PublicationService",
+    "buildProductionPublisher",
     "StorageAdapter",
     "S3StorageAdapter",
     "validateSchema",

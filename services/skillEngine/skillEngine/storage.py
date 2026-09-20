@@ -8,6 +8,9 @@ class StorageAdapter:
     def writeAsset(self, key: str, data: bytes) -> str:
         raise NotImplementedError("Subclasses must implement writeAsset")
 
+    def assetExists(self, key: str) -> bool:
+        raise NotImplementedError("Subclasses must implement assetExists")
+
 
 class S3StorageAdapter(StorageAdapter):
     def __init__(
@@ -62,11 +65,31 @@ class S3StorageAdapter(StorageAdapter):
         self._validateKey(key)
         if not isinstance(data, bytes):
             raise TypeError("Storage payload must be bytes")
+        contentType = "application/octet-stream"
+        if key.endswith(".json"):
+            contentType = "application/json"
+        elif key.endswith(".mp3"):
+            contentType = "audio/mpeg"
+        elif key.endswith(".txt"):
+            contentType = "text/plain; charset=utf-8"
         self._getClient().put_object(
             Bucket=self.bucket,
             Key=key,
             Body=data,
-            ContentType="application/json",
+            ContentType=contentType,
             ServerSideEncryption="AES256",
         )
         return key
+
+    def assetExists(self, key: str) -> bool:
+        self._validateKey(key)
+        try:
+            self._getClient().head_object(Bucket=self.bucket, Key=key)
+            return True
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            code = str(response.get("Error", {}).get("Code", ""))
+            status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if code in {"404", "NoSuchKey", "NotFound"} or status == 404:
+                return False
+            raise
