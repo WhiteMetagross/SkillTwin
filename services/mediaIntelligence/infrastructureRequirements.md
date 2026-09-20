@@ -1,107 +1,97 @@
 # Media intelligence infrastructure requirements
 
-This document specifies the AWS permissions, configuration settings, and resource quotas required by the media intelligence service for central infrastructure integration by Person 3.
+## Runtime resources
 
-## Service overview and AWS components
+The production container requires:
 
-The media intelligence service requires access to three Amazon Web Services capabilities:
+- Python 3.12
+- FFmpeg and ffprobe
+- writable temporary disk for bounded S3 staging (750 MiB by default)
+- network access to Amazon S3, Amazon Transcribe, and the configured Amazon Bedrock Runtime model
 
-1. Amazon Simple Storage Service for storage of raw video uploads, extracted JPEG frames, and transcript JSON files
-2. Amazon Transcribe for asynchronous speech recognition and word timestamp alignment
-3. Amazon Bedrock for multimodal frame sequence observation and visual state reasoning
-4. Amazon Rekognition as an optional service for label detection if requested in later phases
+Source videos are limited to 180 seconds, 250 MiB, 4096 x 2160, 120 frames per second, and 120 sampled frames. Actual streamed bytes are checked against both S3 metadata and configured limits. Reference images are limited to 10 MiB and 32 megapixels. Media is validated before Transcribe or Bedrock calls.
 
-## Minimal IAM permissions
+## IAM permissions
 
-The execution role for media intelligence tasks must grant the following minimal actions:
-
-### Amazon S3 permissions
+Scope bucket resources and the Bedrock model ARN to the deployed environment.
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "MediaStorageAccess",
+      "Sid": "MediaObjectReadWrite",
       "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:HeadObject"
-      ],
+      "Action": ["s3:GetObject", "s3:PutObject"],
       "Resource": [
         "arn:aws:s3:::skilltwin-media-*/*"
       ]
-    }
-  ]
-}
-```
-
-### Amazon Transcribe permissions
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
+    },
     {
-      "Sid": "TranscribeAccess",
+      "Sid": "TranscriptionLifecycle",
       "Effect": "Allow",
       "Action": [
         "transcribe:StartTranscriptionJob",
         "transcribe:GetTranscriptionJob"
       ],
       "Resource": "*"
-    }
-  ]
-}
-```
-
-### Amazon Bedrock permissions
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
+    },
     {
-      "Sid": "BedrockInvokeModel",
+      "Sid": "BedrockObservation",
       "Effect": "Allow",
-      "Action": [
-        "bedrock:InvokeModel"
-      ],
-      "Resource": [
-        "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-sonnet-20240620-v1:0"
-      ]
+      "Action": ["bedrock:InvokeModel"],
+      "Resource": "arn:aws:bedrock:*::foundation-model/*"
     }
   ]
 }
 ```
 
-## Configuration parameters and environment variables
+`HeadObject` authorization is evaluated through `s3:GetObject`. If `TRANSCRIBE_OUTPUT_BUCKET` differs from `S3_MEDIA_BUCKET`, grant the same object permissions on both buckets and configure Amazon Transcribe to write to the output bucket.
 
-The following environment variables configure the media intelligence service:
+Amazon Transcribe also needs permission to read the exact source object and write its raw result. Prefer an execution role and bucket policies; never inject long-lived credentials into the image.
 
-| Variable | Purpose | Recommended value |
-| --- | --- | --- |
-| AWS_REGION | Target AWS region | ap-south-1 |
-| S3_MEDIA_BUCKET | Primary bucket for source media and derived artifacts | skilltwin-media-storage |
-| TRANSCRIBE_OUTPUT_BUCKET | Output bucket for transcript JSON files | skilltwin-media-storage |
-| TRANSCRIBE_LANGUAGE_CODE | Primary language code for transcription | en-IN |
-| BEDROCK_OBSERVER_MODEL_ID | Vision model for frame observation | anthropic.claude-3-5-sonnet-20240620-v1:0 |
-| FRAME_SAMPLE_INTERVAL_MS | Milliseconds between sampled frame extractions | 1500 |
-| VIDEO_MAX_DURATION_SECONDS | Hard ceiling for input video duration | 180 |
+## Environment
 
-## Operational limits and quotas
+Required at startup:
 
-1. Video duration limit:
-   - Hard maximum of 180 seconds per video
-   - Videos exceeding this limit must be rejected before sampling
+- `AWS_REGION`
+- `S3_MEDIA_BUCKET`
+- `BEDROCK_OBSERVER_MODEL_ID`
+- resolvable `ffmpeg` and `ffprobe` executables (or `FFMPEG_PATH` and `FFPROBE_PATH`)
 
-2. Media file sizes and formats:
-   - Supported MIME types: video/mp4, video/webm, video/quicktime
-   - Maximum upload file size: 250 megabytes per video
-   - Extracted JPEG frame quality: 85 percent compression to conserve bandwidth
+Optional:
 
-3. Service timeouts:
-   - Transcribe job completion timeout: 300 seconds
-   - Bedrock frame observation timeout: 30 seconds
-   - Frame sampling timeout per video: 20 seconds
+- `TRANSCRIBE_OUTPUT_BUCKET`
+- `MEDIA_MAX_OBJECT_BYTES` (cannot exceed 250 MiB)
+- `MEDIA_MAX_STAGING_BYTES`
+- `FRAME_SAMPLE_INTERVAL_MS`
+- `MEDIA_MAX_FRAMES` (cannot exceed 120)
+
+Missing or invalid production configuration stops startup. There is no mock or local fallback.
+
+## Orchestration
+
+Use separate Step Functions tasks for start, wait/status, and completion:
+
+```text
+Validate and stage media -> startTranscription
+                         -> Wait -> getTranscriptionStatus
+                                   | queued/in progress -> Wait
+                                   | failed -> fail job
+                                   | completed -> completeTranscription
+                                               -> persist final transcript artifact
+```
+
+Persist the serialized job identity between tasks. Retries use a deterministic job name derived from skill ID, video ID, and the real source key. Access denial, throttling, provider failure, pending, and timeout are distinct errors and must use the workflow's appropriate fail or retry policy.
+
+## Verification
+
+Offline:
+
+```bash
+pytest services/mediaIntelligence
+docker build -f services/mediaIntelligence/Dockerfile -t skilltwin-media .
+docker run --rm skilltwin-media python tests/containerSmoke.py
+```
+
+Live cloud proof additionally requires valid credentials, a test bucket containing a real uploaded media object, Transcribe access, and Bedrock model access. Offline mocked-SDK tests do not constitute live AWS validation.

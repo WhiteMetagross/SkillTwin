@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional
-from .storage import LocalStorageAdapter, S3StorageAdapter, StorageAdapter
+from .storage import LocalStorageAdapter, StorageAdapter
 from .validator import validateSchema, validateTimestamps
 
 class MockMediaIntelligenceAdapter:

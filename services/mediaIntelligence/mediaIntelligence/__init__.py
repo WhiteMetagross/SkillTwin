@@ -1,7 +1,7 @@
 from .audioDetector import AudioDetector, AudioInspectionResult
 from .bedrockObserver import BedrockObserver
 from .bundleComposer import BundleComposer
-from .imageCaptioner import ImageCaption, ImageCaptioner, LocalImageCaptioner
+from .imageCaptioner import ImageCaption, ImageCaptioner, LocalImageCaptioner, ValidatedImageCaptioner
 from .mockAdapter import MockMediaIntelligenceAdapter
 from .observer import (
     ALLOWED_CANDIDATE_ACTIONS,
@@ -10,12 +10,25 @@ from .observer import (
     Observation
 )
 from .pipeline import processAssetManifest
-from .storage import LocalStorageAdapter, S3StorageAdapter, StorageAdapter
+from .runtime import ProductionConfig, ProductionMediaRuntime, createProductionRuntime
+from .storage import (
+    LocalStorageAdapter,
+    ObjectMetadata,
+    S3StorageAdapter,
+    StorageAdapter,
+    validateOwnedSourceKey,
+    validateStorageKey,
+)
 from .transcriber import (
     AmazonTranscribeService,
     LocalTranscribeService,
     TranscribeService,
-    TranscriptSegment
+    TranscriptSegment,
+    TranscriptWord,
+    TranscriptionJobIdentity,
+    TranscriptionResult,
+    TranscriptionState,
+    TranscriptionStatus,
 )
 from .validator import validateSchema, validateTimestamps
 from .videoSampler import SampledFrame, VideoSampler
@@ -31,21 +44,33 @@ __all__ = [
     "ImageCaption",
     "ImageCaptioner",
     "LocalImageCaptioner",
+    "ValidatedImageCaptioner",
     "LocalMediaObserver",
     "LocalStorageAdapter",
     "LocalTranscribeService",
     "MediaObserver",
     "MockMediaIntelligenceAdapter",
     "Observation",
+    "ObjectMetadata",
+    "ProductionConfig",
+    "ProductionMediaRuntime",
     "S3StorageAdapter",
     "SampledFrame",
     "StorageAdapter",
     "TranscribeService",
     "TranscriptSegment",
+    "TranscriptWord",
+    "TranscriptionJobIdentity",
+    "TranscriptionResult",
+    "TranscriptionState",
+    "TranscriptionStatus",
     "VideoMetadata",
     "VideoSampler",
     "VideoValidator",
     "processAssetManifest",
+    "createProductionRuntime",
+    "validateOwnedSourceKey",
     "validateSchema",
+    "validateStorageKey",
     "validateTimestamps"
 ]

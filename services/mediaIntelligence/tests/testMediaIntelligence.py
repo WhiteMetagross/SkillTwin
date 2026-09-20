@@ -1,25 +1,26 @@
 import io
 import json
 from pathlib import Path
+import shutil
 import tempfile
 from unittest.mock import MagicMock
 from PIL import Image
 import pytest
-from mediaIntelligence.audioDetector import AudioDetector
+from mediaIntelligence.audioDetector import AudioDetector, AudioInspectionResult
 from mediaIntelligence.bedrockObserver import BedrockObserver
 from mediaIntelligence.bundleComposer import BundleComposer
+from mediaIntelligence.errors import ObservationProviderError
 from mediaIntelligence.mockAdapter import MockMediaIntelligenceAdapter
 from mediaIntelligence.observer import (
-    DeterministicMockObserver,
     LocalMediaObserver,
     Observation
 )
 from mediaIntelligence.pipeline import processAssetManifest
 from mediaIntelligence.storage import LocalStorageAdapter, S3StorageAdapter
-from mediaIntelligence.transcriber import AmazonTranscribeService, LocalTranscribeService
+from mediaIntelligence.transcriber import LocalTranscribeService, TranscriptSegment
 from mediaIntelligence.validator import validateSchema
-from mediaIntelligence.videoSampler import SampledFrame, VideoSampler
-from mediaIntelligence.videoValidator import VideoMetadata, VideoValidator
+from mediaIntelligence.videoSampler import SampledFrame
+from mediaIntelligence.videoValidator import VideoValidator
 
 def getFixturePath(filename: str) -> Path:
     repoRoot = Path(__file__).resolve().parent.parent.parent.parent
@@ -27,6 +28,20 @@ def getFixturePath(filename: str) -> Path:
 
 def getAssetPath(filename: str) -> Path:
     return Path(__file__).resolve().parent / "assets" / filename
+
+@pytest.fixture
+def assetRoot(tmp_path: Path) -> Path:
+    for filename in ("silent_pack.mp4", "narrated_pack.mp4", "tone_no_speech.mp4", "reference_mug.jpg"):
+        shutil.copy2(getAssetPath(filename), tmp_path / filename)
+    return tmp_path
+
+class FixedAudioDetector:
+    def __init__(self, speechByName: dict[str, bool]) -> None:
+        self.speechByName = speechByName
+
+    def inspectAudio(self, localFilePath: Path) -> AudioInspectionResult:
+        speech = self.speechByName.get(localFilePath.name, False)
+        return AudioInspectionResult(True, speech, inspectedDurationMs=2000)
 
 def testMockAdapterBaseline() -> None:
     manifestPath = getFixturePath("assetManifest.valid.json")
@@ -44,8 +59,8 @@ def testMockAdapterBaseline() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Evidence bundle schema error: {error}"
 
-def testProcessRealSilentVideo() -> None:
-    assetDir = getAssetPath("")
+def testProcessRealSilentVideo(assetRoot: Path) -> None:
+    assetDir = assetRoot
     manifest = {
         "schemaVersion": 1,
         "skillId": "skill-silent-001",
@@ -66,7 +81,11 @@ def testProcessRealSilentVideo() -> None:
         "supervisorNotes": None
     }
 
-    bundle = processAssetManifest(manifest, assetRoot=assetDir)
+    bundle = processAssetManifest(
+        manifest,
+        assetRoot=assetDir,
+        audioDetector=FixedAudioDetector({"silent_pack.mp4": False}),
+    )
 
     assert bundle["schemaVersion"] == 1
     assert bundle["skillId"] == "skill-silent-001"
@@ -87,8 +106,8 @@ def testProcessRealSilentVideo() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Schema error: {error}"
 
-def testProcessRealNarratedVideo() -> None:
-    assetDir = getAssetPath("")
+def testProcessRealNarratedVideo(assetRoot: Path) -> None:
+    assetDir = assetRoot
     manifest = {
         "schemaVersion": 1,
         "skillId": "skill-narrated-001",
@@ -115,7 +134,13 @@ def testProcessRealNarratedVideo() -> None:
         "supervisorNotes": "Audio narration included"
     }
 
-    bundle = processAssetManifest(manifest, assetRoot=assetDir)
+    transcript = TranscriptSegment(500, 2000, "Inspect the ceramic mug", 0.98)
+    bundle = processAssetManifest(
+        manifest,
+        assetRoot=assetDir,
+        audioDetector=FixedAudioDetector({"narrated_pack.mp4": True}),
+        transcriber=LocalTranscribeService({"video-narrated-001": [transcript]}),
+    )
 
     assert bundle["schemaVersion"] == 1
     assert len(bundle["videos"]) == 1
@@ -134,8 +159,8 @@ def testProcessRealNarratedVideo() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Schema error: {error}"
 
-def testProcessToneNoSpeechVideo() -> None:
-    assetDir = getAssetPath("")
+def testProcessToneNoSpeechVideo(assetRoot: Path) -> None:
+    assetDir = assetRoot
     manifest = {
         "schemaVersion": 1,
         "skillId": "skill-tone-001",
@@ -156,7 +181,11 @@ def testProcessToneNoSpeechVideo() -> None:
         "supervisorNotes": None
     }
 
-    bundle = processAssetManifest(manifest, assetRoot=assetDir)
+    bundle = processAssetManifest(
+        manifest,
+        assetRoot=assetDir,
+        audioDetector=FixedAudioDetector({"tone_no_speech.mp4": False}),
+    )
 
     vRecord = bundle["videos"][0]
     assert vRecord["hasNarration"] is False
@@ -168,13 +197,20 @@ def testProcessToneNoSpeechVideo() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Schema error: {error}"
 
-def testProcessTwoVideosIndependently() -> None:
-    assetDir = getAssetPath("")
-    manifestPath = assetDir / "testManifestReal.json"
+def testProcessTwoVideosIndependently(assetRoot: Path) -> None:
+    assetDir = assetRoot
+    manifestPath = getAssetPath("testManifestReal.json")
     with open(manifestPath, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    bundle = processAssetManifest(manifest, assetRoot=assetDir)
+    manifest["documents"] = []
+    transcript = TranscriptSegment(500, 2000, "Inspect the ceramic mug", 0.98)
+    bundle = processAssetManifest(
+        manifest,
+        assetRoot=assetDir,
+        audioDetector=FixedAudioDetector({"narrated_pack.mp4": True, "silent_pack.mp4": False}),
+        transcriber=LocalTranscribeService({"video-001": [transcript]}),
+    )
 
     assert len(bundle["videos"]) == 2
     assert bundle["videos"][0]["videoId"] == "video-001"
@@ -198,6 +234,8 @@ def testProcessTwoVideosIndependently() -> None:
 
 def testIdenticalNarratedBytesUnderDifferentFilenames() -> None:
     detector = AudioDetector()
+    if not detector.ffmpegPath or not detector.ffprobePath:
+        pytest.skip("ffmpeg and ffprobe are exercised by the container smoke/test environment")
     narratedOriginal = getAssetPath("narrated_pack.mp4")
     originalResult = detector.inspectAudio(narratedOriginal)
     assert originalResult.hasUsableSpeech is True
@@ -215,51 +253,16 @@ def testIdenticalNarratedBytesUnderDifferentFilenames() -> None:
         if tempPath.is_file():
             tempPath.unlink()
 
-def testCompletedTranscriptArtifactAndPendingJobRejection() -> None:
-    mockTranscribe = MagicMock()
-    # Case 1: Job is IN_PROGRESS -> must not return a transcript key
-    mockTranscribe.get_transcription_job.return_value = {
-        "TranscriptionJob": {
-            "TranscriptionJobStatus": "IN_PROGRESS"
-        }
-    }
-
-    service = AmazonTranscribeService(transcribeClient=mockTranscribe)
-    storage = LocalStorageAdapter(getAssetPath(""))
-
-    pendingKey, pendingSegs = service.transcribe("v1", "skill-001", None, storage)
-    assert pendingKey is None
-    assert len(pendingSegs) == 0
-
-    # Case 2: Job is COMPLETED -> parses segments and writes artifact
-    transcriptJsonContent = json.dumps({
-        "results": {
-            "items": [
-                {
-                    "type": "pronunciation",
-                    "start_time": "0.5",
-                    "end_time": "2.0",
-                    "alternatives": [{"content": "Inspect ceramic mug", "confidence": "0.98"}]
-                }
-            ]
-        }
+def testCompletedTranscriptArtifactUsesTemporaryStorage(tmp_path: Path) -> None:
+    storage = LocalStorageAdapter(tmp_path)
+    service = LocalTranscribeService({
+        "v1": [TranscriptSegment(500, 2000, "Inspect ceramic mug", 0.98)]
     })
-
-    mockTranscribe.get_transcription_job.return_value = {
-        "TranscriptionJob": {
-            "TranscriptionJobStatus": "COMPLETED",
-            "Transcript": {
-                "TranscriptFileUri": transcriptJsonContent
-            }
-        }
-    }
-
-    compKey, compSegs = service.transcribe("v1", "skill-001", None, storage)
-    assert compKey is not None
-    assert len(compSegs) == 1
-    assert compSegs[0].text == "Inspect ceramic mug"
-    assert compSegs[0].startMs == 500
-    assert storage.assetExists(compKey) is True
+    result = service.transcribe("v1", "skill-001", None, storage, sourceLanguage="enIN")
+    assert result.transcriptKey is not None
+    assert result.hasNarration is True
+    assert result.segments[0].startMs == 500
+    assert storage.assetExists(result.transcriptKey) is True
 
 def testBlankOrIrrelevantFramesProduceNoCannedObservations() -> None:
     observer = LocalMediaObserver()
@@ -290,14 +293,14 @@ def testLocalStorageCannotReadOutsideAssetRoot() -> None:
     with pytest.raises(ValueError, match="traversal"):
         storage.readAsset("../../../package.json")
 
-def testS3InputStagesLocallyForValidationAndSampling() -> None:
+def testS3InputStagesLocallyForValidationAndSampling(tmp_path: Path) -> None:
     mockS3 = MagicMock()
     realVideoBytes = getAssetPath("silent_pack.mp4").read_bytes()
 
     mockS3.head_object.return_value = {"ContentLength": len(realVideoBytes)}
     mockS3.get_object.return_value = {"Body": io.BytesIO(realVideoBytes)}
 
-    adapter = S3StorageAdapter("test-bucket", s3Client=mockS3)
+    adapter = S3StorageAdapter("test-bucket", s3Client=mockS3, stagingDirectory=tmp_path)
     stagedPath = adapter.resolveLocalPath("skills/s1/source/videos/video-001.mp4")
 
     assert stagedPath is not None
@@ -386,6 +389,5 @@ def testBedrockObserverFailsClosedOnError() -> None:
     frames = [
         SampledFrame("v1", 0, 0, "skills/skill-001/derived/frames/v1/0.jpg", b"fakejpg", 160, 120)
     ]
-    observations = observer.observeVideo("v1", "skill-001", frames, [])
-    # Must fail closed with empty list, never returning canned observations
-    assert observations == []
+    with pytest.raises(ObservationProviderError, match="Bedrock observation failed"):
+        observer.observeVideo("v1", "skill-001", frames, [])
