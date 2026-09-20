@@ -7,7 +7,13 @@ from .pipeline import processAssetManifest
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="SkillTwin media intelligence CLI with real media processing and fixture mock mode"
+        description="SkillTwin media intelligence local CLI"
+    )
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=("mock", "local"),
+        help="Explicitly select deterministic fixture mocks or local media processing"
     )
     parser.add_argument("--manifest", required=True, help="Path to asset manifest JSON file")
     parser.add_argument("--asset-root", required=False, default=None, help="Root directory for local video assets")
@@ -23,25 +29,11 @@ def main() -> None:
     with open(manifestPath, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    # Determine processing mode based on asset root and file existence
-    useRealPipeline = False
-    assetRootPath = None
-
-    if args.asset_root:
-        assetRootPath = Path(args.asset_root)
-        useRealPipeline = True
-    else:
-        # Check if first video sourceKey exists locally
-        videos = manifest.get("videos", [])
-        if videos:
-            firstKey = videos[0].get("sourceKey", "")
-            if Path(firstKey).is_file():
-                useRealPipeline = True
-                assetRootPath = Path.cwd()
-
     try:
-        if useRealPipeline:
-            bundle = processAssetManifest(manifest, assetRoot=assetRootPath)
+        if args.mode == "local":
+            if not args.asset_root:
+                parser.error("--asset-root is required when --mode local is selected")
+            bundle = processAssetManifest(manifest, assetRoot=Path(args.asset_root))
         else:
             adapter = MockMediaIntelligenceAdapter()
             bundle = adapter.processManifest(manifest)

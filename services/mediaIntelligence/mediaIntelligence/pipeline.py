@@ -15,7 +15,8 @@ def processAssetManifest(
     assetRoot: Optional[Path] = None,
     storageAdapter: Optional[StorageAdapter] = None,
     observer: Optional[MediaObserver] = None,
-    transcriber: Optional[TranscribeService] = None
+    transcriber: Optional[TranscribeService] = None,
+    audioDetector: Optional[AudioDetector] = None
 ) -> Dict[str, Any]:
     """
     Narrow service entry point for SkillTwin media intelligence pipeline.
@@ -35,7 +36,7 @@ def processAssetManifest(
     storage = storageAdapter or LocalStorageAdapter(assetRoot)
     videoValidator = VideoValidator()
     sampler = VideoSampler(intervalMs=1500)
-    audioDetector = AudioDetector()
+    audioInspector = audioDetector or AudioDetector()
     transcribeSvc = transcriber or LocalTranscribeService()
     captioner = LocalImageCaptioner()
     mediaObserver = observer or LocalMediaObserver()
@@ -75,14 +76,16 @@ def processAssetManifest(
             suppliedFrameKeysMap[videoId] = suppliedKeys
 
             # Inspect actual audio stream for acoustic speech characteristics
-            audioResult = audioDetector.inspectAudio(localPath)
+            audioResult = audioInspector.inspectAudio(localPath)
 
             if audioResult.hasUsableSpeech:
                 transcriptKey, segments = transcribeSvc.transcribe(
                     videoId=videoId,
                     skillId=skillId,
                     localFilePath=localPath,
-                    storageAdapter=storage
+                    storageAdapter=storage,
+                    sourceKey=sourceKey,
+                    sourceLanguage=manifest.get("sourceLanguage", "auto")
                 )
                 if transcriptKey is not None and storage.assetExists(transcriptKey):
                     videoRecords.append({

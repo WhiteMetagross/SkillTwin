@@ -1,22 +1,70 @@
 import json
+import re
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
+
 from .storage import StorageAdapter
 
+
 class TranscriptSegment:
-    def __init__(self, startMs: int, endMs: int, text: str, confidence: float = 0.95) -> None:
+    def __init__(
+        self,
+        startMs: int,
+        endMs: int,
+        text: str,
+        confidence: float = 0.95,
+        languageCode: Optional[str] = None
+    ) -> None:
         self.startMs = startMs
         self.endMs = endMs
         self.text = text
         self.confidence = confidence
+        self.languageCode = languageCode
 
     def toDict(self) -> Dict[str, Any]:
-        return {
+        result: Dict[str, Any] = {
             "startMs": self.startMs,
             "endMs": self.endMs,
             "text": self.text,
             "confidence": self.confidence
         }
+        if self.languageCode:
+            result["languageCode"] = self.languageCode
+        return result
+
+
+class TranscriptionState(str, Enum):
+    NOT_FOUND = "notFound"
+    QUEUED = "queued"
+    IN_PROGRESS = "inProgress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class TranscriptionJobStatus:
+    jobName: str
+    state: TranscriptionState
+    transcriptUri: Optional[str] = None
+    languageCode: Optional[str] = None
+    failureReason: Optional[str] = None
+
+
+class TranscriptionProviderError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class TranscriptionPendingError(RuntimeError):
+    def __init__(self, jobName: str, state: TranscriptionState) -> None:
+        super().__init__(f"Transcription job {jobName} is {state.value}")
+        self.jobName = jobName
+        self.state = state
+
 
 class TranscribeService:
     def transcribe(
@@ -24,7 +72,9 @@ class TranscribeService:
         videoId: str,
         skillId: str,
         localFilePath: Optional[Path],
-        storageAdapter: StorageAdapter
+        storageAdapter: StorageAdapter,
+        sourceKey: Optional[str] = None,
+        sourceLanguage: str = "auto"
     ) -> Tuple[Optional[str], List[TranscriptSegment]]:
         raise NotImplementedError("Subclasses must implement transcribe")
 
@@ -35,20 +85,14 @@ class TranscribeService:
         endMs: int
     ) -> Optional[str]:
         matching = []
-        for seg in segments:
-            # Check for temporal overlap between segment and observation interval
-            if max(startMs, seg.startMs) < min(endMs, seg.endMs):
-                matching.append(seg.text)
-        if matching:
-            return " ".join(matching)
-        return None
+        for segment in segments:
+            if max(startMs, segment.startMs) < min(endMs, segment.endMs):
+                matching.append(segment.text)
+        return " ".join(matching) if matching else None
+
 
 class LocalTranscribeService(TranscribeService):
-    """
-    Local transcription service that produces real timestamped segments.
-    Writes the transcript JSON artifact to storage before returning its key.
-    Never advertises a transcript key when no transcript artifact exists.
-    """
+    """Explicit local-demo transcriber used only by tests and local mode."""
 
     def __init__(self, customSegmentStore: Optional[Dict[str, List[TranscriptSegment]]] = None) -> None:
         self.customSegmentStore = customSegmentStore or {}
@@ -58,19 +102,19 @@ class LocalTranscribeService(TranscribeService):
         videoId: str,
         skillId: str,
         localFilePath: Optional[Path],
-        storageAdapter: StorageAdapter
+        storageAdapter: StorageAdapter,
+        sourceKey: Optional[str] = None,
+        sourceLanguage: str = "auto"
     ) -> Tuple[Optional[str], List[TranscriptSegment]]:
+        del sourceKey, sourceLanguage
         segments: List[TranscriptSegment] = []
 
         if videoId in self.customSegmentStore:
             segments = self.customSegmentStore[videoId]
         elif localFilePath and localFilePath.is_file():
-            # Check if video contains speech via content analysis
             from .audioDetector import AudioDetector
-            detector = AudioDetector()
-            inspection = detector.inspectAudio(localFilePath)
+            inspection = AudioDetector().inspectAudio(localFilePath)
             if inspection.hasUsableSpeech:
-                # Provide real timestamped segments aligned with the packaging narration
                 segments = [
                     TranscriptSegment(500, 1500, "Inspect the ceramic mug for cracks first", 0.96),
                     TranscriptSegment(1500, 2500, "Choose the small standard box", 0.94)
@@ -79,87 +123,121 @@ class LocalTranscribeService(TranscribeService):
         if not segments:
             return None, []
 
-        # Write transcript JSON artifact to storage before returning key
         transcriptKey = f"skills/{skillId}/derived/transcripts/{videoId}.json"
         payload = {
             "schemaVersion": 1,
             "videoId": videoId,
-            "segments": [s.toDict() for s in segments]
+            "segments": [segment.toDict() for segment in segments]
         }
         storageAdapter.writeAsset(transcriptKey, json.dumps(payload, indent=2).encode("utf-8"))
         return transcriptKey, segments
 
+
 class AmazonTranscribeService(TranscribeService):
-    """
-    Amazon Transcribe adapter for asynchronous cloud transcription.
-    Only returns a transcript key once the job is completed and the artifact is written.
-    Never advertises a transcript key for queued or in progress jobs.
-    """
+    """Asynchronous Amazon Transcribe adapter suitable for Step Functions polling."""
+
+    LANGUAGE_CODES = {
+        "enIN": "en-IN",
+        "hiIN": "hi-IN"
+    }
 
     def __init__(
         self,
         transcribeClient: Optional[Any] = None,
         s3Client: Optional[Any] = None,
-        outputBucket: str = "skilltwin-transcripts",
+        sourceBucket: str = "skilltwin-media",
+        outputBucket: str = "skilltwin-media",
         mediaFormat: str = "mp4",
-        languageCode: str = "en-IN"
+        regionName: Optional[str] = None
     ) -> None:
         self.transcribeClient = transcribeClient
         self.s3Client = s3Client
+        self.sourceBucket = sourceBucket
         self.outputBucket = outputBucket
         self.mediaFormat = mediaFormat
-        self.languageCode = languageCode
+        self.regionName = regionName
 
     def _getTranscribeClient(self) -> Any:
         if self.transcribeClient is not None:
             return self.transcribeClient
         import boto3
-        return boto3.client("transcribe")
+        return boto3.client("transcribe", region_name=self.regionName)
 
     def _getS3Client(self) -> Any:
         if self.s3Client is not None:
             return self.s3Client
         import boto3
-        return boto3.client("s3")
+        return boto3.client("s3", region_name=self.regionName)
 
-    def transcribe(
+    def buildJobName(self, skillId: str, videoId: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9._-]", "-", f"skilltwin-{skillId}-{videoId}")
+        return safe[:200]
+
+    def startTranscription(
         self,
         videoId: str,
         skillId: str,
-        localFilePath: Optional[Path],
+        sourceKey: str,
+        sourceLanguage: str
+    ) -> TranscriptionJobStatus:
+        if not sourceKey:
+            raise ValueError("A server-issued sourceKey is required for Amazon Transcribe")
+        jobName = self.buildJobName(skillId, videoId)
+        request: Dict[str, Any] = {
+            "TranscriptionJobName": jobName,
+            "MediaFormat": self.mediaFormat,
+            "Media": {"MediaFileUri": f"s3://{self.sourceBucket}/{sourceKey}"},
+            "OutputBucketName": self.outputBucket,
+            "OutputKey": f"skills/{skillId}/derived/transcribe/{videoId}/provider.json"
+        }
+        if sourceLanguage == "auto":
+            request["IdentifyLanguage"] = True
+            request["LanguageOptions"] = list(self.LANGUAGE_CODES.values())
+        elif sourceLanguage in self.LANGUAGE_CODES:
+            request["LanguageCode"] = self.LANGUAGE_CODES[sourceLanguage]
+        else:
+            raise ValueError(f"Unsupported source language: {sourceLanguage}")
+
+        try:
+            response = self._getTranscribeClient().start_transcription_job(**request)
+        except Exception as exc:
+            raise self._providerError(exc) from exc
+        return self._normalizeJob(jobName, response.get("TranscriptionJob", {}))
+
+    def getTranscriptionStatus(self, jobName: str) -> TranscriptionJobStatus:
+        try:
+            response = self._getTranscribeClient().get_transcription_job(
+                TranscriptionJobName=jobName
+            )
+        except Exception as exc:
+            providerError = self._providerError(exc)
+            if providerError.code == "notFound":
+                return TranscriptionJobStatus(jobName, TranscriptionState.NOT_FOUND)
+            raise providerError from exc
+        return self._normalizeJob(jobName, response.get("TranscriptionJob", {}))
+
+    def completeTranscription(
+        self,
+        status: TranscriptionJobStatus,
+        videoId: str,
+        skillId: str,
         storageAdapter: StorageAdapter
     ) -> Tuple[Optional[str], List[TranscriptSegment]]:
-        client = self._getTranscribeClient()
-        jobName = f"skilltwin-transcribe-{skillId}-{videoId}"
-
-        # Check existing job status
-        try:
-            getResp = client.get_transcription_job(TranscriptionJobName=jobName)
-            job = getResp.get("TranscriptionJob", {})
-            status = job.get("TranscriptionJobStatus")
-        except Exception:
-            # If job not found, start new job
-            mediaUri = f"s3://{self.outputBucket}/skills/{skillId}/source/videos/{videoId}.mp4"
-            startResp = client.start_transcription_job(
-                TranscriptionJobName=jobName,
-                LanguageCode=self.languageCode,
-                MediaFormat=self.mediaFormat,
-                Media={"MediaFileUri": mediaUri},
-                OutputBucketName=self.outputBucket
+        if status.state in (TranscriptionState.QUEUED, TranscriptionState.IN_PROGRESS):
+            raise TranscriptionPendingError(status.jobName, status.state)
+        if status.state == TranscriptionState.FAILED:
+            raise TranscriptionProviderError(
+                "failed",
+                status.failureReason or f"Transcription job {status.jobName} failed"
             )
-            job = startResp.get("TranscriptionJob", {})
-            status = job.get("TranscriptionJobStatus", "IN_PROGRESS")
+        if status.state != TranscriptionState.COMPLETED:
+            raise TranscriptionProviderError(
+                "invalidState",
+                f"Transcription job {status.jobName} is not complete"
+            )
 
-        # If job is QUEUED or IN_PROGRESS, do NOT advertise a transcript key yet
-        if status in ("QUEUED", "IN_PROGRESS"):
-            return None, []
-
-        if status != "COMPLETED":
-            return None, []
-
-        # Parse completed transcript output
-        transcriptFileUri = job.get("Transcript", {}).get("TranscriptFileUri")
-        segments = self._parseTranscriptFile(transcriptFileUri)
+        data = self._loadTranscript(status.transcriptUri)
+        segments = self._parseTranscriptItems(data, status.languageCode)
         if not segments:
             return None, []
 
@@ -167,42 +245,136 @@ class AmazonTranscribeService(TranscribeService):
         payload = {
             "schemaVersion": 1,
             "videoId": videoId,
-            "segments": [s.toDict() for s in segments]
+            "languageCode": status.languageCode,
+            "segments": [segment.toDict() for segment in segments]
         }
         storageAdapter.writeAsset(transcriptKey, json.dumps(payload, indent=2).encode("utf-8"))
         return transcriptKey, segments
 
-    def _parseTranscriptFile(self, transcriptUri: Optional[str]) -> List[TranscriptSegment]:
+    def transcribe(
+        self,
+        videoId: str,
+        skillId: str,
+        localFilePath: Optional[Path],
+        storageAdapter: StorageAdapter,
+        sourceKey: Optional[str] = None,
+        sourceLanguage: str = "auto"
+    ) -> Tuple[Optional[str], List[TranscriptSegment]]:
+        del localFilePath
+        jobName = self.buildJobName(skillId, videoId)
+        status = self.getTranscriptionStatus(jobName)
+        if status.state == TranscriptionState.NOT_FOUND:
+            status = self.startTranscription(
+                videoId,
+                skillId,
+                sourceKey or "",
+                sourceLanguage
+            )
+        if status.state in (TranscriptionState.QUEUED, TranscriptionState.IN_PROGRESS):
+            raise TranscriptionPendingError(status.jobName, status.state)
+        return self.completeTranscription(status, videoId, skillId, storageAdapter)
+
+    def _normalizeJob(self, jobName: str, job: Dict[str, Any]) -> TranscriptionJobStatus:
+        providerStatus = job.get("TranscriptionJobStatus")
+        states = {
+            "QUEUED": TranscriptionState.QUEUED,
+            "IN_PROGRESS": TranscriptionState.IN_PROGRESS,
+            "COMPLETED": TranscriptionState.COMPLETED,
+            "FAILED": TranscriptionState.FAILED
+        }
+        if providerStatus not in states:
+            raise TranscriptionProviderError(
+                "invalidResponse",
+                f"Amazon Transcribe returned unknown status: {providerStatus}"
+            )
+        return TranscriptionJobStatus(
+            jobName=jobName,
+            state=states[providerStatus],
+            transcriptUri=job.get("Transcript", {}).get("TranscriptFileUri"),
+            languageCode=job.get("LanguageCode"),
+            failureReason=job.get("FailureReason")
+        )
+
+    def _providerError(self, exc: Exception) -> TranscriptionProviderError:
+        response = getattr(exc, "response", {})
+        error = response.get("Error", {}) if isinstance(response, dict) else {}
+        providerCode = str(error.get("Code", exc.__class__.__name__))
+        message = str(error.get("Message", str(exc)))
+        normalized = providerCode.lower()
+        if "notfound" in normalized or "badrequest" in normalized and "not found" in message.lower():
+            code = "notFound"
+        elif "accessdenied" in normalized or "unauthorized" in normalized:
+            code = "accessDenied"
+        elif "throttl" in normalized or "limitexceeded" in normalized:
+            code = "throttled"
+        elif "timeout" in normalized:
+            code = "timedOut"
+        else:
+            code = "providerError"
+        return TranscriptionProviderError(code, f"Amazon Transcribe {code}: {message}")
+
+    def _loadTranscript(self, transcriptUri: Optional[str]) -> Dict[str, Any]:
         if not transcriptUri:
-            return []
+            raise TranscriptionProviderError("invalidResponse", "Completed job has no transcript URI")
         try:
-            # Extract bucket and key from s3 uri or parse direct json string in tests
-            if transcriptUri.startswith("{"):
+            if transcriptUri.lstrip().startswith("{"):
                 data = json.loads(transcriptUri)
             else:
-                s3 = self._getS3Client()
-                resp = s3.get_object(Bucket=self.outputBucket, Key=transcriptUri.split("/")[-1])
-                data = json.loads(resp["Body"].read())
+                parsed = urlparse(transcriptUri)
+                if parsed.scheme == "s3":
+                    bucket = parsed.netloc
+                    key = unquote(parsed.path.lstrip("/"))
+                elif parsed.scheme in ("http", "https"):
+                    bucket = self.outputBucket
+                    key = unquote(parsed.path.lstrip("/"))
+                    if key.startswith(f"{bucket}/"):
+                        key = key[len(bucket) + 1:]
+                else:
+                    bucket = self.outputBucket
+                    key = transcriptUri.lstrip("/")
+                response = self._getS3Client().get_object(Bucket=bucket, Key=key)
+                raw = response["Body"].read()
+                data = json.loads(raw)
+        except TranscriptionProviderError:
+            raise
+        except Exception as exc:
+            raise TranscriptionProviderError(
+                "invalidTranscript",
+                f"Could not load completed transcript: {exc}"
+            ) from exc
+        if not isinstance(data, dict) or not isinstance(data.get("results"), dict):
+            raise TranscriptionProviderError("invalidTranscript", "Transcript JSON is malformed")
+        return data
 
-            results = data.get("results", {})
-            items = results.get("items", [])
-            segments: List[TranscriptSegment] = []
-
-            for item in items:
-                if item.get("type") == "pronunciation":
-                    startSec = float(item.get("start_time", 0.0))
-                    endSec = float(item.get("end_time", startSec + 0.5))
-                    alt = item.get("alternatives", [{}])[0]
-                    content = alt.get("content", "")
-                    confidence = float(alt.get("confidence", 0.95))
-                    segments.append(
-                        TranscriptSegment(
-                            startMs=int(startSec * 1000),
-                            endMs=int(endSec * 1000),
-                            text=content,
-                            confidence=confidence
-                        )
-                    )
-            return segments
-        except Exception:
-            return []
+    def _parseTranscriptItems(
+        self,
+        data: Dict[str, Any],
+        languageCode: Optional[str]
+    ) -> List[TranscriptSegment]:
+        items = data["results"].get("items", [])
+        if not isinstance(items, list):
+            raise TranscriptionProviderError("invalidTranscript", "Transcript items must be an array")
+        segments: List[TranscriptSegment] = []
+        for item in items:
+            if not isinstance(item, dict) or item.get("type") != "pronunciation":
+                continue
+            try:
+                startMs = int(float(item["start_time"]) * 1000)
+                endMs = int(float(item["end_time"]) * 1000)
+                alternative = item["alternatives"][0]
+                text = str(alternative["content"]).strip()
+                confidence = float(alternative.get("confidence", 0.0))
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise TranscriptionProviderError(
+                    "invalidTranscript",
+                    f"Transcript word timing is malformed: {exc}"
+                ) from exc
+            if not text or endMs <= startMs or not 0.0 <= confidence <= 1.0:
+                raise TranscriptionProviderError(
+                    "invalidTranscript",
+                    "Transcript word contains invalid text, timing, or confidence"
+                )
+            segments.append(
+                TranscriptSegment(startMs, endMs, text, confidence, languageCode)
+            )
+        return segments

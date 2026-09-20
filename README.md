@@ -107,7 +107,7 @@ Open `http://localhost:3000` in your web browser to explore:
 Media intelligence service:
 
 ```bash
-python -m mediaIntelligence.cli --manifest ../../packages/contracts/fixtures/assetManifest.valid.json
+python -m mediaIntelligence.cli --mode mock --manifest ../../packages/contracts/fixtures/assetManifest.valid.json
 ```
 (Run from `services/mediaIntelligence`)
 

@@ -1,5 +1,6 @@
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import struct
@@ -29,8 +30,14 @@ class AudioDetector:
         ffmpegPath: Optional[str] = None,
         ffprobePath: Optional[str] = None
     ) -> None:
-        self.ffmpegPath = ffmpegPath or shutil.which("ffmpeg")
-        self.ffprobePath = ffprobePath or shutil.which("ffprobe")
+        self.ffmpegPath = ffmpegPath or os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg")
+        if not self.ffmpegPath:
+            try:
+                import imageio_ffmpeg
+                self.ffmpegPath = imageio_ffmpeg.get_ffmpeg_exe()
+            except (ImportError, RuntimeError):
+                self.ffmpegPath = None
+        self.ffprobePath = ffprobePath or os.environ.get("FFPROBE_PATH") or shutil.which("ffprobe")
 
     def inspectAudio(self, localFilePath: Path) -> AudioInspectionResult:
         if not localFilePath.is_file():
@@ -92,7 +99,8 @@ class AudioDetector:
             return False
 
         try:
-            # Extract up to 30 seconds of 16kHz mono 16 bit PCM directly to pipe
+            # Decode the complete clip. Video validation caps input duration at 180 seconds,
+            # so full-clip inspection remains bounded while still detecting delayed speech.
             decodeCmd = [
                 self.ffmpegPath,
                 "-v", "error",
@@ -100,7 +108,6 @@ class AudioDetector:
                 "-f", "s16le",
                 "-ac", "1",
                 "-ar", "16000",
-                "-t", "30",
                 "-"
             ]
             proc = subprocess.run(decodeCmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)

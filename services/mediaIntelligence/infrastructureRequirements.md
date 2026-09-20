@@ -87,6 +87,8 @@ The following environment variables configure the media intelligence service:
 | TRANSCRIBE_OUTPUT_BUCKET | Output bucket for transcript JSON files | skilltwin-media-storage |
 | TRANSCRIBE_LANGUAGE_CODE | Primary language code for transcription | en-IN |
 | BEDROCK_OBSERVER_MODEL_ID | Vision model for frame observation | anthropic.claude-3-5-sonnet-20240620-v1:0 |
+| FFMPEG_PATH | Absolute path to the FFmpeg binary | /usr/bin/ffmpeg |
+| FFPROBE_PATH | Absolute path to the ffprobe binary | /usr/bin/ffprobe |
 | FRAME_SAMPLE_INTERVAL_MS | Milliseconds between sampled frame extractions | 1500 |
 | VIDEO_MAX_DURATION_SECONDS | Hard ceiling for input video duration | 180 |
 

@@ -1,13 +1,18 @@
 import io
 import json
 from pathlib import Path
+import shutil
+import sys
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import MagicMock
+from unittest.mock import patch
 from PIL import Image
 import pytest
 from mediaIntelligence.audioDetector import AudioDetector
 from mediaIntelligence.bedrockObserver import BedrockObserver
 from mediaIntelligence.bundleComposer import BundleComposer
+from mediaIntelligence.cli import main as cliMain
 from mediaIntelligence.mockAdapter import MockMediaIntelligenceAdapter
 from mediaIntelligence.observer import (
     DeterministicMockObserver,
@@ -15,8 +20,15 @@ from mediaIntelligence.observer import (
     Observation
 )
 from mediaIntelligence.pipeline import processAssetManifest
+from mediaIntelligence.production import ProductionConfig, buildProductionRuntime
 from mediaIntelligence.storage import LocalStorageAdapter, S3StorageAdapter
-from mediaIntelligence.transcriber import AmazonTranscribeService, LocalTranscribeService
+from mediaIntelligence.transcriber import (
+    AmazonTranscribeService,
+    LocalTranscribeService,
+    TranscriptionPendingError,
+    TranscriptionProviderError,
+    TranscriptionState
+)
 from mediaIntelligence.validator import validateSchema
 from mediaIntelligence.videoSampler import SampledFrame, VideoSampler
 from mediaIntelligence.videoValidator import VideoMetadata, VideoValidator
@@ -27,6 +39,11 @@ def getFixturePath(filename: str) -> Path:
 
 def getAssetPath(filename: str) -> Path:
     return Path(__file__).resolve().parent / "assets" / filename
+
+def createTempAssetRoot(tmp_path: Path, *filenames: str) -> Path:
+    for filename in filenames:
+        shutil.copy2(getAssetPath(filename), tmp_path / filename)
+    return tmp_path
 
 def testMockAdapterBaseline() -> None:
     manifestPath = getFixturePath("assetManifest.valid.json")
@@ -44,8 +61,74 @@ def testMockAdapterBaseline() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Evidence bundle schema error: {error}"
 
-def testProcessRealSilentVideo() -> None:
-    assetDir = getAssetPath("")
+def testCliRequiresExplicitRuntimeMode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["skilltwin-media-intelligence", "--manifest", "manifest.json"]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cliMain()
+    assert exc.value.code == 2
+
+def testProductionConfigFailsWhenRequiredProviderSettingsAreMissing(tmp_path: Path) -> None:
+    ffmpeg = tmp_path / "ffmpeg"
+    ffprobe = tmp_path / "ffprobe"
+    ffmpeg.touch()
+    ffprobe.touch()
+    environment = {
+        "AWS_REGION": "ap-south-1",
+        "S3_MEDIA_BUCKET": "media-bucket",
+        "TRANSCRIBE_OUTPUT_BUCKET": "transcript-bucket",
+        "FFMPEG_PATH": str(ffmpeg),
+        "FFPROBE_PATH": str(ffprobe)
+    }
+
+    with pytest.raises(RuntimeError, match="BEDROCK_OBSERVER_MODEL_ID"):
+        ProductionConfig.fromEnvironment(environment)
+
+def testProductionRuntimeUsesOnlyScopedAwsAdapters(tmp_path: Path) -> None:
+    ffmpeg = tmp_path / "ffmpeg"
+    ffprobe = tmp_path / "ffprobe"
+    ffmpeg.touch()
+    ffprobe.touch()
+    config = ProductionConfig.fromEnvironment({
+        "AWS_REGION": "ap-south-1",
+        "S3_MEDIA_BUCKET": "media-bucket",
+        "TRANSCRIBE_OUTPUT_BUCKET": "transcript-bucket",
+        "BEDROCK_OBSERVER_MODEL_ID": "test-model",
+        "FFMPEG_PATH": str(ffmpeg),
+        "FFPROBE_PATH": str(ffprobe)
+    })
+
+    class FakeSession:
+        def __init__(self, region_name: str) -> None:
+            self.regionName = region_name
+            self.clients = {}
+
+        def client(self, serviceName: str) -> MagicMock:
+            client = MagicMock(name=serviceName)
+            self.clients[serviceName] = client
+            return client
+
+    sessions = []
+
+    def sessionFactory(**kwargs):
+        session = FakeSession(kwargs["region_name"])
+        sessions.append(session)
+        return session
+
+    runtime = buildProductionRuntime("skill-001", config, sessionFactory=sessionFactory)
+
+    assert sessions[0].regionName == "ap-south-1"
+    assert runtime.storage.bucketName == "media-bucket"
+    assert runtime.storage.allowedPrefix == "skills/skill-001/"
+    assert runtime.transcriber.outputBucket == "transcript-bucket"
+    assert runtime.observer.modelId == "test-model"
+    assert set(sessions[0].clients) == {"s3", "transcribe", "bedrock-runtime"}
+
+def testProcessRealSilentVideo(tmp_path: Path) -> None:
+    assetDir = createTempAssetRoot(tmp_path, "silent_pack.mp4")
     manifest = {
         "schemaVersion": 1,
         "skillId": "skill-silent-001",
@@ -87,8 +170,8 @@ def testProcessRealSilentVideo() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Schema error: {error}"
 
-def testProcessRealNarratedVideo() -> None:
-    assetDir = getAssetPath("")
+def testProcessRealNarratedVideo(tmp_path: Path) -> None:
+    assetDir = createTempAssetRoot(tmp_path, "narrated_pack.mp4", "reference_mug.jpg")
     manifest = {
         "schemaVersion": 1,
         "skillId": "skill-narrated-001",
@@ -134,8 +217,8 @@ def testProcessRealNarratedVideo() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Schema error: {error}"
 
-def testProcessToneNoSpeechVideo() -> None:
-    assetDir = getAssetPath("")
+def testProcessToneNoSpeechVideo(tmp_path: Path) -> None:
+    assetDir = createTempAssetRoot(tmp_path, "tone_no_speech.mp4")
     manifest = {
         "schemaVersion": 1,
         "skillId": "skill-tone-001",
@@ -168,9 +251,14 @@ def testProcessToneNoSpeechVideo() -> None:
     valid, error = validateSchema("evidenceBundle", bundle)
     assert valid, f"Schema error: {error}"
 
-def testProcessTwoVideosIndependently() -> None:
-    assetDir = getAssetPath("")
-    manifestPath = assetDir / "testManifestReal.json"
+def testProcessTwoVideosIndependently(tmp_path: Path) -> None:
+    assetDir = createTempAssetRoot(
+        tmp_path,
+        "narrated_pack.mp4",
+        "silent_pack.mp4",
+        "reference_mug.jpg"
+    )
+    manifestPath = getAssetPath("testManifestReal.json")
     with open(manifestPath, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
@@ -215,7 +303,7 @@ def testIdenticalNarratedBytesUnderDifferentFilenames() -> None:
         if tempPath.is_file():
             tempPath.unlink()
 
-def testCompletedTranscriptArtifactAndPendingJobRejection() -> None:
+def testCompletedTranscriptArtifactAndPendingJobRejection(tmp_path: Path) -> None:
     mockTranscribe = MagicMock()
     # Case 1: Job is IN_PROGRESS -> must not return a transcript key
     mockTranscribe.get_transcription_job.return_value = {
@@ -225,11 +313,11 @@ def testCompletedTranscriptArtifactAndPendingJobRejection() -> None:
     }
 
     service = AmazonTranscribeService(transcribeClient=mockTranscribe)
-    storage = LocalStorageAdapter(getAssetPath(""))
+    storage = LocalStorageAdapter(tmp_path)
 
-    pendingKey, pendingSegs = service.transcribe("v1", "skill-001", None, storage)
-    assert pendingKey is None
-    assert len(pendingSegs) == 0
+    with pytest.raises(TranscriptionPendingError) as pending:
+        service.transcribe("v1", "skill-001", None, storage)
+    assert pending.value.state == TranscriptionState.IN_PROGRESS
 
     # Case 2: Job is COMPLETED -> parses segments and writes artifact
     transcriptJsonContent = json.dumps({
@@ -248,6 +336,7 @@ def testCompletedTranscriptArtifactAndPendingJobRejection() -> None:
     mockTranscribe.get_transcription_job.return_value = {
         "TranscriptionJob": {
             "TranscriptionJobStatus": "COMPLETED",
+            "LanguageCode": "en-IN",
             "Transcript": {
                 "TranscriptFileUri": transcriptJsonContent
             }
@@ -259,7 +348,103 @@ def testCompletedTranscriptArtifactAndPendingJobRejection() -> None:
     assert len(compSegs) == 1
     assert compSegs[0].text == "Inspect ceramic mug"
     assert compSegs[0].startMs == 500
+    assert compSegs[0].languageCode == "en-IN"
     assert storage.assetExists(compKey) is True
+
+def testTranscribeStartsMissingJobWithExactSourceKeyAndLanguage(tmp_path: Path) -> None:
+    class ProviderException(Exception):
+        def __init__(self) -> None:
+            self.response = {
+                "Error": {
+                    "Code": "ResourceNotFoundException",
+                    "Message": "job not found"
+                }
+            }
+
+    mockTranscribe = MagicMock()
+    mockTranscribe.get_transcription_job.side_effect = ProviderException()
+    mockTranscribe.start_transcription_job.return_value = {
+        "TranscriptionJob": {"TranscriptionJobStatus": "QUEUED"}
+    }
+    service = AmazonTranscribeService(
+        transcribeClient=mockTranscribe,
+        sourceBucket="media-bucket",
+        outputBucket="output-bucket"
+    )
+
+    with pytest.raises(TranscriptionPendingError) as pending:
+        service.transcribe(
+            "video-001",
+            "skill-001",
+            None,
+            LocalStorageAdapter(tmp_path),
+            sourceKey="skills/skill-001/source/assets/asset-123",
+            sourceLanguage="hiIN"
+        )
+
+    assert pending.value.state == TranscriptionState.QUEUED
+    request = mockTranscribe.start_transcription_job.call_args.kwargs
+    assert request["Media"]["MediaFileUri"] == (
+        "s3://media-bucket/skills/skill-001/source/assets/asset-123"
+    )
+    assert request["LanguageCode"] == "hi-IN"
+    assert "IdentifyLanguage" not in request
+
+def testTranscribeDifferentiatesAccessDeniedFromMissingJob(tmp_path: Path) -> None:
+    class ProviderException(Exception):
+        def __init__(self) -> None:
+            self.response = {
+                "Error": {
+                    "Code": "AccessDeniedException",
+                    "Message": "not authorized"
+                }
+            }
+
+    mockTranscribe = MagicMock()
+    mockTranscribe.get_transcription_job.side_effect = ProviderException()
+    service = AmazonTranscribeService(transcribeClient=mockTranscribe)
+
+    with pytest.raises(TranscriptionProviderError) as denied:
+        service.transcribe("video-001", "skill-001", None, LocalStorageAdapter(tmp_path))
+
+    assert denied.value.code == "accessDenied"
+    mockTranscribe.start_transcription_job.assert_not_called()
+
+def testTranscribeAutoLanguageRequestAndFailedState(tmp_path: Path) -> None:
+    mockTranscribe = MagicMock()
+    mockTranscribe.start_transcription_job.return_value = {
+        "TranscriptionJob": {"TranscriptionJobStatus": "IN_PROGRESS"}
+    }
+    service = AmazonTranscribeService(
+        transcribeClient=mockTranscribe,
+        sourceBucket="media-bucket"
+    )
+    started = service.startTranscription(
+        "video-001",
+        "skill-001",
+        "skills/skill-001/source/video.mp4",
+        "auto"
+    )
+    request = mockTranscribe.start_transcription_job.call_args.kwargs
+    assert started.state == TranscriptionState.IN_PROGRESS
+    assert request["IdentifyLanguage"] is True
+    assert request["LanguageOptions"] == ["en-IN", "hi-IN"]
+
+    mockTranscribe.get_transcription_job.return_value = {
+        "TranscriptionJob": {
+            "TranscriptionJobStatus": "FAILED",
+            "FailureReason": "Unsupported media"
+        }
+    }
+    with pytest.raises(TranscriptionProviderError) as failed:
+        service.transcribe(
+            "video-001",
+            "skill-001",
+            None,
+            LocalStorageAdapter(tmp_path)
+        )
+    assert failed.value.code == "failed"
+    assert "Unsupported media" in str(failed.value)
 
 def testBlankOrIrrelevantFramesProduceNoCannedObservations() -> None:
     observer = LocalMediaObserver()
@@ -315,6 +500,70 @@ def testS3InputStagesLocallyForValidationAndSampling() -> None:
     # Cleanup removes the staged file
     adapter.cleanup()
     assert not stagedPath.is_file()
+
+def testS3StagingRemovesPartialFileOnDownloadFailure(tmp_path: Path) -> None:
+    class FailingBody:
+        def __init__(self) -> None:
+            self.readCount = 0
+            self.closed = False
+
+        def read(self, _size: int) -> bytes:
+            self.readCount += 1
+            if self.readCount == 1:
+                return b"partial"
+            raise OSError("simulated interrupted download")
+
+        def close(self) -> None:
+            self.closed = True
+
+    body = FailingBody()
+    mockS3 = MagicMock()
+    mockS3.head_object.return_value = {"ContentLength": 100}
+    mockS3.get_object.return_value = {"Body": body}
+    adapter = S3StorageAdapter("test-bucket", s3Client=mockS3, stagingRoot=tmp_path)
+
+    with pytest.raises(OSError, match="interrupted download"):
+        adapter.resolveLocalPath("skills/s1/source/videos/video.mp4")
+
+    assert list(tmp_path.iterdir()) == []
+    assert body.closed is True
+
+def testS3StagingRejectsLengthMismatchAndWrongOwnerPrefix(tmp_path: Path) -> None:
+    mockS3 = MagicMock()
+    mockS3.head_object.return_value = {"ContentLength": 4}
+    mockS3.get_object.return_value = {"Body": io.BytesIO(b"five!")}
+    adapter = S3StorageAdapter(
+        "test-bucket",
+        s3Client=mockS3,
+        allowedPrefix="skills/s1",
+        stagingRoot=tmp_path
+    )
+
+    with pytest.raises(ValueError, match="downloaded 5 bytes, expected 4"):
+        adapter.resolveLocalPath("skills/s1/source/videos/video.mp4")
+    assert list(tmp_path.iterdir()) == []
+
+    with pytest.raises(ValueError, match="outside allowed prefix"):
+        adapter.resolveLocalPath("skills/s2/source/videos/video.mp4")
+
+def testS3ReadAssetIsBounded() -> None:
+    mockS3 = MagicMock()
+    mockS3.get_object.return_value = {"Body": io.BytesIO(b"12345")}
+    adapter = S3StorageAdapter("test-bucket", s3Client=mockS3)
+    adapter.MAX_REMOTE_BYTES = 4
+
+    with pytest.raises(ValueError, match="byte limit"):
+        adapter.readAsset("skills/s1/derived/transcripts/video.json")
+
+def testAudioInspectionCoversCompleteValidatedClip() -> None:
+    pcm = b"\x01\x00" * 3200
+    with patch("mediaIntelligence.audioDetector.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout=pcm, stderr=b"")
+        detector = AudioDetector(ffmpegPath="ffmpeg")
+        detector._analyzeAcousticSpeech(Path("video.mp4"))
+
+    command = run.call_args.args[0]
+    assert "-t" not in command
 
 def testObserverIntervalExceedingVideoDurationRejection() -> None:
     composer = BundleComposer()
