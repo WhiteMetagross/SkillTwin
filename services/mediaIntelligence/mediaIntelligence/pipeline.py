@@ -114,7 +114,8 @@ def processAssetManifest(
                 skillId=skillId,
                 frames=frames,
                 transcriptSegments=segments,
-                referenceCaptions=referenceCaptions
+                referenceCaptions=referenceCaptions,
+                videoDurationMs=metadata.durationMs
             )
             if not obsList:
                 raise ValueError(

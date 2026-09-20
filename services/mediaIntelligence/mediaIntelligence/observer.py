@@ -66,7 +66,8 @@ class MediaObserver:
         skillId: str,
         frames: List[SampledFrame],
         transcriptSegments: List[TranscriptSegment],
-        referenceCaptions: Optional[List[ImageCaption]] = None
+        referenceCaptions: Optional[List[ImageCaption]] = None,
+        videoDurationMs: Optional[int] = None
     ) -> List[Observation]:
         raise NotImplementedError("Subclasses must implement observeVideo")
 
@@ -82,8 +83,10 @@ class DeterministicMockObserver(MediaObserver):
         skillId: str,
         frames: List[SampledFrame],
         transcriptSegments: List[TranscriptSegment],
-        referenceCaptions: Optional[List[ImageCaption]] = None
+        referenceCaptions: Optional[List[ImageCaption]] = None,
+        videoDurationMs: Optional[int] = None
     ) -> List[Observation]:
+        del skillId, transcriptSegments, referenceCaptions, videoDurationMs
         if not frames:
             return []
         f0 = frames[0]
@@ -118,7 +121,8 @@ class LocalMediaObserver(MediaObserver):
         skillId: str,
         frames: List[SampledFrame],
         transcriptSegments: List[TranscriptSegment],
-        referenceCaptions: Optional[List[ImageCaption]] = None
+        referenceCaptions: Optional[List[ImageCaption]] = None,
+        videoDurationMs: Optional[int] = None
     ) -> List[Observation]:
         if not frames:
             return []
@@ -161,7 +165,7 @@ class LocalMediaObserver(MediaObserver):
             return []
 
         observations: List[Observation] = []
-        totalDurationMs = max(frames[-1].timestampMs + 1000, 1000)
+        totalDurationMs = videoDurationMs or max(frames[-1].timestampMs + 1000, 1000)
 
         # Helper to align spoken evidence from transcript segments
         def getSpokenEvidence(start: int, end: int) -> Optional[str]:

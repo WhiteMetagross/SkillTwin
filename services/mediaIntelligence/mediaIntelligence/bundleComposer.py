@@ -33,6 +33,7 @@ class BundleComposer:
             suppliedKeys = suppliedFrameKeysMap.get(videoId) if suppliedFrameKeysMap else None
 
             sortedInVideo = sorted(obsList, key=lambda o: (o.startMs, o.endMs))
+            validatedInVideo: List[Observation] = []
 
             for obs in sortedInVideo:
                 if not validateTimestamps(obs.startMs, obs.endMs):
@@ -49,6 +50,21 @@ class BundleComposer:
                 if obs.confidence < 0.0 or obs.confidence > 1.0:
                     raise ValueError(f"Observation confidence {obs.confidence} outside valid range 0.0 to 1.0")
 
+                textFields = {
+                    "beforeState": obs.beforeState,
+                    "action": obs.action,
+                    "afterState": obs.afterState
+                }
+                for fieldName, value in textFields.items():
+                    if not isinstance(value, str) or not value.strip():
+                        raise ValueError(f"Observation {fieldName} must be a nonempty visible fact")
+                if (
+                    not isinstance(obs.visibleObjects, list)
+                    or not obs.visibleObjects
+                    or any(not isinstance(value, str) or not value.strip() for value in obs.visibleObjects)
+                ):
+                    raise ValueError("Observation visibleObjects must contain nonempty visible facts")
+
                 if suppliedKeys is not None and obs.referenceFrameKey not in suppliedKeys:
                     raise ValueError(
                         f"Observation reference frame '{obs.referenceFrameKey}' was not in supplied sampled frames"
@@ -58,11 +74,27 @@ class BundleComposer:
                 if not storageAdapter.assetExists(obs.referenceFrameKey):
                     raise ValueError(f"Reference frame does not exist in storage: {obs.referenceFrameKey}")
 
-                # Enforce silent video rule: spokenEvidence must be null
-                if isSilent:
-                    obs.spokenEvidence = None
+                if isSilent and obs.spokenEvidence is not None:
+                    raise ValueError("Silent video observation cannot contain spokenEvidence")
 
-                allObservations.append(obs)
+                duplicate = next((
+                    current for current in reversed(validatedInVideo)
+                    if current.candidateAction == obs.candidateAction
+                    and current.action.casefold() == obs.action.casefold()
+                    and obs.startMs <= current.endMs
+                ), None)
+                if duplicate is None:
+                    validatedInVideo.append(obs)
+                else:
+                    duplicate.endMs = max(duplicate.endMs, obs.endMs)
+                    duplicate.visibleObjects = list(dict.fromkeys(
+                        duplicate.visibleObjects + obs.visibleObjects
+                    ))
+                    if obs.confidence > duplicate.confidence:
+                        duplicate.referenceFrameKey = obs.referenceFrameKey
+                        duplicate.confidence = obs.confidence
+
+            allObservations.extend(validatedInVideo)
 
         # Sort all observations by manifest video order first, then timestamp within video
         allObservations.sort(key=lambda o: (videoOrderMap[o.videoId], o.startMs))
